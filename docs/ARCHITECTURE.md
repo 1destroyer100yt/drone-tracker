@@ -10,7 +10,8 @@ camera gimbal and, optionally, an ArduPilot fixed-wing.
 | [`tracker.py`](../tracker.py) | Desktop/CLI tracker: camera capture, MediaPipe pose, crosses, distance, optional MAVLink. |
 | [`app.py`](../app.py) | Flask web control panel: multi-camera, RTSP, auto-best view, per-camera controls. Reuses `tracker.py`'s engine pieces. |
 | [`uav.py`](../uav.py) | MAVLink link: gimbal aim (`MOUNT_CONTROL`) and orbit-follow (`DO_REPOSITION`) with safety gates. |
-| [`geo.py`](../geo.py) | Pure geometry: camera line-of-sight → ground lat/lon. Unit-tested. |
+| [`geo.py`](../geo.py) | Pure geometry: camera line-of-sight → ground lat/lon (flat-ground or measured-range). Unit-tested. |
+| [`distance.py`](../distance.py) | Monocular person-distance estimate (pinhole model via HFOV). Unit-tested. |
 | [`test_uav.py`](../test_uav.py) | Gimbal angle tests (UDP loopback, no hardware). |
 | [`test_flight.py`](../test_flight.py) | Geo-projection + follow safety-gate tests (fake MAVLink). |
 | [`models/`](../models) | MediaPipe `.task` / `.tflite` model files (pose lite/full, face). |
@@ -46,6 +47,13 @@ camera gimbal and, optionally, an ArduPilot fixed-wing.
   model's confidence, so half-occluded points don't drag the cross.
 - **One-Euro filter.** Smooths jitter when still, tracks fast motion with almost
   no lag — better than a moving average.
+- **Stable identity.** `TrackAssigner` matches each detection to the nearest one
+  from the previous frame, so the per-track smoothing filters don't swap between
+  people when more than one is in view.
+- **Distance estimate.** `distance.py` reads a body segment of known real size
+  (shoulders ≈ 0.40 m, eyes ≈ 0.063 m) and the camera focal length (from
+  `--hfov`) to estimate metres to each person. Feeds the on-screen readout and,
+  for follow, a better target range than the flat-ground assumption.
 - **Threaded capture.** A background grabber always hands over the newest frame
   and drops stale ones, keeping latency at ~one frame (matters for gimbal aim).
 

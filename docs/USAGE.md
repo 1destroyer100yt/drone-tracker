@@ -4,7 +4,7 @@
 
 Desktop (dev/testing):
 ```bash
-pip install opencv-python==4.12.0.88 mediapipe pymavlink flask
+pip install -r requirements.txt
 ```
 
 Raspberry Pi (64-bit Raspberry Pi OS required for MediaPipe):
@@ -29,7 +29,12 @@ python3 tracker.py --headless            # no window (onboard / SSH)
 
 Overlay: **red** cross on each face/body, **green** on the person closest to
 center, **blue** cross at screen center, white lines labeled with pixel
-distance. Press `q`/`Esc` to quit (`Ctrl+C` in headless).
+distance, and a **`~N.Nm` real-world distance** estimate per person. Press
+`q`/`Esc` to quit (`Ctrl+C` in headless).
+
+**Distance:** estimated from shoulder width via the pinhole model; tune with
+`--shoulder-width 0.40` (metres) if your subjects differ. It's a ±15-20%
+estimate — see [SAFETY.md](SAFETY.md).
 
 ### With a UAV
 ```bash
@@ -48,9 +53,17 @@ for follow), `--orbit-radius/-speed`, `--min-alt`, `--geofence`.
 ## Web control panel
 
 ```bash
-python3 app.py                           # http://127.0.0.1:5000
+python3 app.py                           # http://127.0.0.1:5000 (open, localhost)
 python3 app.py --host 0.0.0.0 --port 8080  # reachable from other devices
+python3 app.py --host 0.0.0.0 --token mysecret   # require a token
 ```
+
+**Access control:** on localhost the panel is open for convenience. When you
+bind to a network address (`--host 0.0.0.0`) a **token is required** — pass
+`--token`, or one is auto-generated and printed. The startup line prints the
+full URL with `?t=…`; open that. The page loads freely but every API/video call
+needs the token. **Do not enable Follow on an untrusted network** — the panel
+can command the aircraft.
 
 - **Add camera:** dropdown + Detect for local cams, or paste an RTSP/HTTP URL.
 - **Tabs:** one per camera; select which the controls act on. × removes it.
@@ -64,7 +77,8 @@ python3 app.py --host 0.0.0.0 --port 8080  # reachable from other devices
 
 ```bash
 python3 test_uav.py        # gimbal angle math over UDP loopback
-python3 test_flight.py     # geo-projection + follow safety gates
+python3 test_flight.py     # geo-projection (flat + range) + follow safety gates
+python3 test_distance.py   # monocular person-distance pinhole math
 ```
 
 ## ArduPilot SITL (simulated flight)

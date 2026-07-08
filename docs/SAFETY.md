@@ -36,9 +36,18 @@ It is not a system that approaches or homes on a person.
 
 ## Assumptions & limitations
 
+- **Distance estimate is approximate (±15-20%).** The monocular range in
+  `distance.py` assumes an average shoulder width and shrinks when a person
+  turns sideways (reads them as farther). When available it replaces the
+  flat-ground assumption in the follow projection, but it is not a rangefinder.
+  Do not rely on it for close-approach decisions.
 - **Flat ground** and a **body-fixed camera** are assumed by the geo-projection
-  in `geo.py`. Sloped terrain or a stabilized gimbal will bias the target
-  estimate. Set `--cam-tilt` to your actual fixed camera down-angle.
+  in `geo.py` when no measured range is available. Sloped terrain or a
+  stabilized gimbal will bias the target estimate. Set `--cam-tilt` to your
+  actual fixed camera down-angle.
+- **Web panel can command the aircraft.** Never enable Follow through the web
+  panel on an untrusted network; use `--token` and keep it off open Wi-Fi. See
+  [USAGE.md](USAGE.md#web-control-panel).
 - Target position accuracy depends on good **altitude and attitude telemetry**.
 - Multi-person tracking (`--num-poses` > 1) does not guarantee stable identity
   between frames; for single-target follow use `--num-poses 1` (the default).
