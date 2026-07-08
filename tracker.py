@@ -237,6 +237,9 @@ class ObjectFollower:
     def _new_tracker(self):
         if self.algo == "KCF" and hasattr(cv2, "TrackerKCF_create"):
             return cv2.TrackerKCF_create()
+        if self.algo == "DROTRACK":
+            from third_party.drotrack import DroTrackCV   # lazy: needs scipy
+            return DroTrackCV()
         return cv2.TrackerCSRT_create()
 
     def start(self, frame, cx, cy, box=None):
@@ -251,9 +254,17 @@ class ObjectFollower:
         bw = int(max(8, min(bw, w - x)))
         bh = int(max(8, min(bh, h - y)))
         self.tracker = self._new_tracker()
-        self.tracker.init(frame, (x, y, bw, bh))
+        try:
+            res = self.tracker.init(frame, (x, y, bw, bh))
+        except Exception:
+            res = False
+        if res is False:        # DroTrack couldn't lock (cv2 returns None = ok)
+            self.tracker = None
+            self.box = None
+            return False
         self.box = (x, y, bw, bh)
         self.lost = 0
+        return True
 
     def update(self, frame):
         """Return the (cx, cy) centre of the tracked box, or None if lost."""
@@ -377,9 +388,10 @@ def parse_args():
     ap.add_argument("--target-width", type=float, default=1.8,
                     help="real width in metres of a clicked object, for its "
                          "distance estimate (default 1.8 = a car)")
-    ap.add_argument("--tracker", choices=("CSRT", "KCF"), default="CSRT",
-                    help="click-to-follow tracker: CSRT (accurate) or KCF "
-                         "(faster, for weaker CPUs)")
+    ap.add_argument("--tracker", choices=("CSRT", "KCF", "DROTRACK"),
+                    default="CSRT",
+                    help="click-to-follow tracker: CSRT (accurate), KCF "
+                         "(faster), or DROTRACK (drone-tuned, TF-free)")
     # advanced flight: orbit-follow the target (opt-in, needs --mavlink)
     ap.add_argument("--follow", action="store_true",
                     help="ADVANCED: command the plane to ORBIT the tracked "

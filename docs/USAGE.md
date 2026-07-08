@@ -55,9 +55,16 @@ an object (or **left-drag** a box around it) to lock a CSRT tracker onto it — 
 becomes the green TARGET and drives the gimbal/follow instead of the closest
 person. **Right-click** to clear. Set the object's real width for its distance
 estimate with `--target-width 1.8` (metres; 1.8 ≈ a car). Choose the tracker
-with `--tracker CSRT` (accurate, default) or `--tracker KCF` (faster). In the
-web panel, **click the video** to do the same, with **Tracker** and **Clear
-target** buttons.
+with `--tracker CSRT` (accurate, default), `--tracker KCF` (faster), or
+`--tracker DROTRACK` (a vendored, TensorFlow-free build of DroTrack, tuned for
+drone footage — see [third_party/drotrack/NOTICE.md](../third_party/drotrack/NOTICE.md)).
+In the web panel, **click the video** and use the **Tracker** / **Clear target**
+buttons.
+
+Compare the trackers on a synthetic sequence with `python3 benchmark_trackers.py`.
+On clean synthetic video CSRT is the most accurate and DroTrack the fastest;
+DroTrack's advantage is real aerial footage with camera ego-motion, so benchmark
+on your own clips before choosing.
 
 **Distance:** estimated from shoulder width via the pinhole model; tune with
 `--shoulder-width 0.40` (metres) if your subjects differ. It's a ±15-20%

@@ -627,7 +627,8 @@ function toggleMav(){const e=cur(); if(!e)return;
       document.getElementById('conn').value);}
 function toggleFollow(){const e=cur(); if(e)ctl('set_follow',!e.follow);}
 function clearTarget(){const e=cur(); if(e)ctl('clear_target');}
-function toggleTracker(){const e=cur(); if(e)ctl('set_tracker',e.tracker==='KCF'?'CSRT':'KCF');}
+function toggleTracker(){const e=cur(); if(!e)return;
+  const nx={CSRT:'KCF',KCF:'DROTRACK',DROTRACK:'CSRT'}; ctl('set_tracker',nx[e.tracker]||'CSRT');}
 function vidClick(ev){
   const e=cur(); if(!e)return;
   const img=ev.target, r=img.getBoundingClientRect();
@@ -796,7 +797,7 @@ def control():
             return jsonify(ok=False, error="set_target needs {x,y}"), 400
     elif action == "clear_target":
         eng.clear_target()
-    elif action == "set_tracker" and value in ("CSRT", "KCF"):
+    elif action == "set_tracker" and value in ("CSRT", "KCF", "DROTRACK"):
         eng.follower.algo = value       # applies on the next click/re-lock
         eng.log(f"object tracker: {value}")
     elif action == "connect_mavlink":
