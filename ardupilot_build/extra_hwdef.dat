@@ -1,0 +1,49 @@
+# Custom ArduPilot feature selection for the body/face tracker UAV.
+#
+# This is the same kind of artifact the ArduPilot CustomBuild web app
+# (custom.ardupilot.org) generates from the feature checkboxes: an
+# "extra hwdef" that turns individual AP_*_ENABLED macros on or off. It is
+# fed to waf with  --extra-hwdef=extra_hwdef.dat  at configure time.
+#
+# Syntax: `undef` clears whatever the board default set, then `define` pins
+# our value.  1 = compiled in, 0 = compiled out (saves flash).
+
+# ---- features THIS project needs ------------------------------------------
+
+# Camera mount / gimbal.  Required for the MOUNT_CONTROL messages uav.py sends
+# to aim the camera at the tracked person.
+undef AP_MOUNT_ENABLED
+define AP_MOUNT_ENABLED 1
+undef AP_CAMERA_MOUNT_ENABLED
+define AP_CAMERA_MOUNT_ENABLED 1
+
+# Servo gimbal backend (a simple pan/tilt servo mount, as opposed to a smart
+# storm/gremsy gimbal on serial).  This is the backend most DIY planes use.
+undef HAL_MOUNT_SERVO_ENABLED
+define HAL_MOUNT_SERVO_ENABLED 1
+
+# Camera trigger control (shutter / recording via MAVLink).
+undef AP_CAMERA_ENABLED
+define AP_CAMERA_ENABLED 1
+
+# Follow library.  Lets the autopilot consume a target position for follow
+# behaviour, complementing the companion's DO_REPOSITION orbit commands.
+undef AP_FOLLOW_ENABLED
+define AP_FOLLOW_ENABLED 1
+
+# Lua scripting.  This is where on-vehicle follow/failsafe logic can live so it
+# keeps running even if the Raspberry Pi companion link drops.  Needs a board
+# with spare flash (CubeOrange etc.); small F4 boards may overflow.
+undef AP_SCRIPTING_ENABLED
+define AP_SCRIPTING_ENABLED 1
+
+# ---- optional flash trimming (uncomment on flash-limited boards) ----------
+# Disable features this camera-tracker plane will not use, to make room for
+# scripting on smaller boards. Leave commented unless a build overflows flash.
+#
+# undef AC_PRECLAND_ENABLED
+# define AC_PRECLAND_ENABLED 0
+# undef HAL_ADSB_ENABLED
+# define HAL_ADSB_ENABLED 0
+# undef AP_OPTICALFLOW_ENABLED
+# define AP_OPTICALFLOW_ENABLED 0

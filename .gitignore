@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ArduPilot source clone created by ardupilot_build/build.sh (multi-GB)
+ardupilot_build/ardupilot/
+
+# OS / editor
+.DS_Store
+*.swp
+
+# scratch
+scratchpad/
+*.log
