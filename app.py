@@ -324,7 +324,8 @@ class TrackerEngine:
                     running=self.running, model=self.model, mirror=self.mirror,
                     num_poses=self.num_poses, mavlink=self.status["mavlink"],
                     follow=self.follow, units=self.units,
-                    target=self.has_target, score=self.status["score"],
+                    target=self.has_target, tracker=self.follower.algo,
+                    score=self.status["score"],
                     status=self.status, events=list(self.events))
 
 
@@ -561,7 +562,9 @@ PAGE = r"""
   </div>
   <p style="font-size:12px;color:var(--muted);margin:8px 0 0">
     Click the video to follow an object (e.g. a car).
-    <button id="clrTargetBtn" style="padding:4px 10px;margin-left:8px"
+    <button id="trackerBtn" style="padding:4px 10px;margin-left:8px"
+            onclick="toggleTracker()">Tracker: CSRT</button>
+    <button id="clrTargetBtn" style="padding:4px 10px;margin-left:4px"
             onclick="clearTarget()">Clear target</button></p>
   <div class="stats">
    <div class="stat"><div class="v" id="s_fps">–</div><div class="k">fps</div></div>
@@ -624,6 +627,7 @@ function toggleMav(){const e=cur(); if(!e)return;
       document.getElementById('conn').value);}
 function toggleFollow(){const e=cur(); if(e)ctl('set_follow',!e.follow);}
 function clearTarget(){const e=cur(); if(e)ctl('clear_target');}
+function toggleTracker(){const e=cur(); if(e)ctl('set_tracker',e.tracker==='KCF'?'CSRT':'KCF');}
 function vidClick(ev){
   const e=cur(); if(!e)return;
   const img=ev.target, r=img.getBoundingClientRect();
@@ -696,6 +700,7 @@ function render(){
   document.getElementById('s_mav').textContent=has?e.mavlink:'off';
   const clr=document.getElementById('clrTargetBtn');
   clr.className=(e&&e.status.target)?'on':''; clr.disabled=!(e&&e.status.target);
+  document.getElementById('trackerBtn').textContent='Tracker: '+(e?e.tracker:'CSRT');
   let hs=`${engines.length} camera${engines.length!==1?'s':''}`;
   if(e&&e.status.target)hs+=' · TARGET LOCKED';
   if(e&&e.status.follow)hs+=' · follow: '+e.status.follow;
@@ -791,6 +796,9 @@ def control():
             return jsonify(ok=False, error="set_target needs {x,y}"), 400
     elif action == "clear_target":
         eng.clear_target()
+    elif action == "set_tracker" and value in ("CSRT", "KCF"):
+        eng.follower.algo = value       # applies on the next click/re-lock
+        eng.log(f"object tracker: {value}")
     elif action == "connect_mavlink":
         eng.connect_mavlink(str(value))
     elif action == "disconnect_mavlink":

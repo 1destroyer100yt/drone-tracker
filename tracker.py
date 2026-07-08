@@ -377,6 +377,9 @@ def parse_args():
     ap.add_argument("--target-width", type=float, default=1.8,
                     help="real width in metres of a clicked object, for its "
                          "distance estimate (default 1.8 = a car)")
+    ap.add_argument("--tracker", choices=("CSRT", "KCF"), default="CSRT",
+                    help="click-to-follow tracker: CSRT (accurate) or KCF "
+                         "(faster, for weaker CPUs)")
     # advanced flight: orbit-follow the target (opt-in, needs --mavlink)
     ap.add_argument("--follow", action="store_true",
                     help="ADVANCED: command the plane to ORBIT the tracked "
@@ -431,7 +434,7 @@ def main():
 
     smoother = PointSmoother()
     assigner = TrackAssigner()
-    follower = ObjectFollower()
+    follower = ObjectFollower(algo=args.tracker)
     obj_filter = None            # One-Euro pair for the object center
     hfov_rad = math.radians(args.hfov)
     imperial = args.units == "imperial"

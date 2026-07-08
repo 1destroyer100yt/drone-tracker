@@ -1,5 +1,23 @@
 # Usage
 
+## Everything on one laptop (simplest)
+
+The whole system — tracking, click-to-follow, distance, the web UI, and the
+MAVLink/Follow command link — runs on a single laptop. Nothing needs to run
+onboard unless you want the lowest-latency flight loop.
+
+```bash
+pip install -r requirements.txt
+python3 app.py            # open http://127.0.0.1:5000
+```
+
+Then in the browser: **Add camera** (your built-in/USB webcam by index, or paste
+the drone's **RTSP** URL), press **Start**, and **click the video** to follow an
+object. To send commands to an aircraft, enter a **MAVLink connection** (your
+SiK radio's serial port, or `udpout:127.0.0.1:14550` for ArduPilot SITL running
+on the same laptop) and toggle Follow. The rest of this doc covers the CLI and
+every option.
+
 ## Install
 
 Desktop (dev/testing):
@@ -36,8 +54,10 @@ distance, and a **`~N.Nm` real-world distance** estimate per person. Press
 an object (or **left-drag** a box around it) to lock a CSRT tracker onto it — it
 becomes the green TARGET and drives the gimbal/follow instead of the closest
 person. **Right-click** to clear. Set the object's real width for its distance
-estimate with `--target-width 1.8` (metres; 1.8 ≈ a car). In the web panel,
-**click the video** to do the same, with a **Clear target** button.
+estimate with `--target-width 1.8` (metres; 1.8 ≈ a car). Choose the tracker
+with `--tracker CSRT` (accurate, default) or `--tracker KCF` (faster). In the
+web panel, **click the video** to do the same, with **Tracker** and **Clear
+target** buttons.
 
 **Distance:** estimated from shoulder width via the pinhole model; tune with
 `--shoulder-width 0.40` (metres) if your subjects differ. It's a ±15-20%
