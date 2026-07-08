@@ -50,6 +50,10 @@ camera gimbal and, optionally, an ArduPilot fixed-wing.
 - **Stable identity.** `TrackAssigner` matches each detection to the nearest one
   from the previous frame, so the per-track smoothing filters don't swap between
   people when more than one is in view.
+- **Click-to-follow.** `ObjectFollower` wraps an OpenCV CSRT tracker: click any
+  object (a car, a bag) in the desktop window or the web video and it becomes the
+  green TARGET, overriding the closest-person pick and driving the gimbal/follow.
+  Works on arbitrary objects, not just people.
 - **Distance estimate.** `distance.py` reads a body segment of known real size
   (shoulders ≈ 0.40 m, eyes ≈ 0.063 m) and the camera focal length (from
   `--hfov`) to estimate metres to each person. Feeds the on-screen readout and,

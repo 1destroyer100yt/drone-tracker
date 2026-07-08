@@ -48,17 +48,32 @@ class TrackerEngine:
         self.num_poses = 1
         self.follow = False
         self.units = "metric"        # or "imperial" (feet + inches)
+        self.target_width = 1.8      # clicked-object real width (m), a car
+
+        # click-to-follow object tracker (seeded from a browser click)
+        self.follower = T.ObjectFollower()
+        self._obj_filter = None
+        self._pending_click = None   # (nx, ny) normalized, set by the web layer
+        self._clear_target = False
+        self.has_target = False
 
         self.jpeg = None
         self.status = {"fps": 0.0, "people": 0, "closest": None,
-                       "range_m": None, "mavlink": "off", "follow": None,
-                       "score": 0.0}
+                       "range_m": None, "target": False, "mavlink": "off",
+                       "follow": None, "score": 0.0}
         self.events = deque(maxlen=40)
         self.uav = None
 
     def label(self):
         return f"Camera {self.source}" if isinstance(self.source, int) \
             else str(self.source)
+
+    def set_target(self, nx, ny):
+        """Seed the object follower at a normalized (0..1) click position."""
+        self._pending_click = (max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny)))
+
+    def clear_target(self):
+        self._clear_target = True
 
     def log(self, msg):
         self.events.appendleft(f"{time.strftime('%H:%M:%S')}  {msg}")
@@ -191,7 +206,6 @@ class TrackerEngine:
             ci = min(range(len(tracked)), key=lambda i: tracked[i][3]) \
                 if tracked else None
             closest_d = tracked[ci][3] if ci is not None else None
-            closest_m = tracked[ci][4] if ci is not None else None
 
             # "best view" score: a clear, centred, confident subject scores
             # high; empty frames score 0. Drives auto camera-swapping.
@@ -202,15 +216,49 @@ class TrackerEngine:
             else:
                 score = 0.0
 
+            # --- click-to-follow object overrides the person pick ---
+            if self._clear_target:
+                self._clear_target = False
+                self.follower.clear()
+                self._obj_filter = None
+            if self._pending_click is not None:
+                nx, ny = self._pending_click
+                self._pending_click = None
+                self.follower.start(frame, nx * w, ny * h)
+                self._obj_filter = (T.OneEuroFilter(), T.OneEuroFilter())
+                self.log(f"target set at ({nx:.2f},{ny:.2f})")
+            obj_center = self.follower.update(frame) if self.follower.active \
+                else None
+            obj_m = None
+            if obj_center is not None:
+                ox, oy = obj_center
+                if self._obj_filter:
+                    ox = self._obj_filter[0](t, ox)
+                    oy = self._obj_filter[1](t, oy)
+                obj_center = (ox, oy)
+                bw_px = self.follower.box[2] if self.follower.box else 0
+                if bw_px > 1:
+                    obj_m = self.target_width * distance.focal_px(
+                        w, hfov_rad) / bw_px
+            self.has_target = obj_center is not None
+
+            if obj_center is not None:
+                target_xy, target_m = obj_center, obj_m
+                ci = None                     # people red; object is green
+            elif ci is not None:
+                target_xy, target_m = (tracked[ci][0], tracked[ci][1]), \
+                    tracked[ci][4]
+            else:
+                target_xy, target_m = None, None
+
             follow_status = None
             if self.uav is not None:
                 self.uav.update_from_telemetry()
-                if ci is not None:
-                    cx, cy, *_ = tracked[ci]
-                    self.uav.send_gimbal((cx, cy), center, (w, h))
+                if target_xy is not None:
+                    self.uav.send_gimbal(target_xy, center, (w, h))
                     if self.follow:
                         follow_status = self.uav.follow_target(
-                            (cx, cy), center, (w, h), range_m=closest_m)
+                            target_xy, center, (w, h), range_m=target_m)
                 else:
                     self.uav.notify_no_target()
 
@@ -227,6 +275,22 @@ class TrackerEngine:
                     tag += " CLOSEST"
                 cv2.putText(frame, tag, (int(x) + T.CROSS_SIZE + 4, int(y) + 4),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
+            # clicked object: green box + cross (the follow TARGET)
+            if obj_center is not None and self.follower.box is not None:
+                bx, by, bw_, bh_ = self.follower.box
+                cv2.rectangle(frame, (bx, by), (bx + bw_, by + bh_), T.GREEN, 2)
+                T.draw_distance(frame, center, obj_center)
+                T.draw_cross(frame, obj_center[0], obj_center[1], T.GREEN)
+                otag = "TARGET"
+                if obj_m is not None:
+                    otag += " ~" + distance.fmt_distance(
+                        obj_m, self.units == "imperial")
+                cv2.putText(frame, otag, (bx, by - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, T.GREEN, 1, cv2.LINE_AA)
+            elif self.follower.active:
+                cv2.putText(frame, "target lost...", (8, 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, T.RED, 1, cv2.LINE_AA)
             T.draw_cross(frame, *center, T.BLUE, size=30)
             cv2.putText(frame, self.label(), (8, h - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, T.WHITE, 1, cv2.LINE_AA)
@@ -236,11 +300,15 @@ class TrackerEngine:
             if ok:
                 with self.lock:
                     self.jpeg = buf.tobytes()
+            target_px = None
+            if target_xy is not None:
+                target_px = round(math.hypot(target_xy[0] - center[0],
+                                             target_xy[1] - center[1]))
             self.status.update(
                 fps=round(fps, 1), people=len(result.pose_landmarks),
-                closest=None if closest_d is None else round(closest_d),
-                range_m=None if closest_m is None else round(closest_m, 1),
-                follow=follow_status, score=score)
+                closest=target_px,
+                range_m=None if target_m is None else round(target_m, 1),
+                target=self.has_target, follow=follow_status, score=score)
 
         grabber.stop()
         if landmarker:
@@ -256,7 +324,7 @@ class TrackerEngine:
                     running=self.running, model=self.model, mirror=self.mirror,
                     num_poses=self.num_poses, mavlink=self.status["mavlink"],
                     follow=self.follow, units=self.units,
-                    score=self.status["score"],
+                    target=self.has_target, score=self.status["score"],
                     status=self.status, events=list(self.events))
 
 
@@ -488,8 +556,13 @@ PAGE = r"""
   <div class="tabs" id="tabs"></div>
   <div class="video" id="videoWrap">
     <div class="empty" id="empty">Add a camera to begin.</div>
-    <img id="vid" alt="video" style="display:none">
+    <img id="vid" alt="video" style="display:none;cursor:crosshair"
+         onclick="vidClick(event)">
   </div>
+  <p style="font-size:12px;color:var(--muted);margin:8px 0 0">
+    Click the video to follow an object (e.g. a car).
+    <button id="clrTargetBtn" style="padding:4px 10px;margin-left:8px"
+            onclick="clearTarget()">Clear target</button></p>
   <div class="stats">
    <div class="stat"><div class="v" id="s_fps">–</div><div class="k">fps</div></div>
    <div class="stat"><div class="v" id="s_people">–</div><div class="k">people</div></div>
@@ -550,6 +623,16 @@ function toggleMav(){const e=cur(); if(!e)return;
   ctl(c?'disconnect_mavlink':'connect_mavlink',
       document.getElementById('conn').value);}
 function toggleFollow(){const e=cur(); if(e)ctl('set_follow',!e.follow);}
+function clearTarget(){const e=cur(); if(e)ctl('clear_target');}
+function vidClick(ev){
+  const e=cur(); if(!e)return;
+  const img=ev.target, r=img.getBoundingClientRect();
+  const nw=img.naturalWidth||r.width, nh=img.naturalHeight||r.height;
+  const scale=Math.min(r.width/nw, r.height/nh);   // object-fit: contain
+  const dw=nw*scale, dh=nh*scale, ox=(r.width-dw)/2, oy=(r.height-dh)/2;
+  const x=(ev.clientX-r.left-ox)/dw, y=(ev.clientY-r.top-oy)/dh;
+  if(x<0||x>1||y<0||y>1)return;                     // clicked the letterbox
+  ctl('set_target',{x,y});}
 function cur(){return engines.find(e=>e.id===sel)||null;}
 
 function render(){
@@ -611,7 +694,10 @@ function render(){
   document.getElementById('s_range').textContent=
      has?fmtM(e.status.range_m,imp):'–';
   document.getElementById('s_mav').textContent=has?e.mavlink:'off';
+  const clr=document.getElementById('clrTargetBtn');
+  clr.className=(e&&e.status.target)?'on':''; clr.disabled=!(e&&e.status.target);
   let hs=`${engines.length} camera${engines.length!==1?'s':''}`;
+  if(e&&e.status.target)hs+=' · TARGET LOCKED';
   if(e&&e.status.follow)hs+=' · follow: '+e.status.follow;
   document.getElementById('hstatus').textContent=hs;
   document.getElementById('log').textContent=e?e.events.join('\n'):'';
@@ -698,6 +784,13 @@ def control():
         eng.mirror = bool(value)
     elif action == "set_units" and value in ("metric", "imperial"):
         eng.units = value
+    elif action == "set_target":
+        try:
+            eng.set_target(float(value["x"]), float(value["y"]))
+        except (TypeError, KeyError, ValueError):
+            return jsonify(ok=False, error="set_target needs {x,y}"), 400
+    elif action == "clear_target":
+        eng.clear_target()
     elif action == "connect_mavlink":
         eng.connect_mavlink(str(value))
     elif action == "disconnect_mavlink":

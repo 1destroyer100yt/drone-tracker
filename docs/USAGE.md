@@ -32,6 +32,13 @@ center, **blue** cross at screen center, white lines labeled with pixel
 distance, and a **`~N.Nm` real-world distance** estimate per person. Press
 `q`/`Esc` to quit (`Ctrl+C` in headless).
 
+**Click to follow an object (e.g. a car):** in the desktop window, **left-click**
+an object (or **left-drag** a box around it) to lock a CSRT tracker onto it — it
+becomes the green TARGET and drives the gimbal/follow instead of the closest
+person. **Right-click** to clear. Set the object's real width for its distance
+estimate with `--target-width 1.8` (metres; 1.8 ≈ a car). In the web panel,
+**click the video** to do the same, with a **Clear target** button.
+
 **Distance:** estimated from shoulder width via the pinhole model; tune with
 `--shoulder-width 0.40` (metres) if your subjects differ. It's a ±15-20%
 estimate — see [SAFETY.md](SAFETY.md). Show it in **feet and inches** with
@@ -51,6 +58,41 @@ python3 tracker.py --mavlink udpout:127.0.0.1:14550 --follow \
 
 Key flags: `--hfov` (match your camera), `--cam-tilt` (fixed camera down-tilt
 for follow), `--orbit-radius/-speed`, `--min-alt`, `--geofence`.
+
+## Where to run it — laptop vs onboard
+
+Yes, you can run everything on your laptop and send commands to the aircraft.
+There are two setups; pick by how tight the control loop needs to be.
+
+**A. Laptop as ground station (easy, higher latency).**
+The aircraft streams its camera (an onboard Pi/IP camera over **RTSP**), and your
+laptop runs the tracker on that stream and sends commands back over a telemetry
+radio.
+```bash
+python3 app.py                 # laptop; add the aircraft's RTSP URL as a camera
+# connect MAVLink to your SiK radio on the laptop, e.g.:
+#   /dev/tty.usbserial-XXXX   (macOS)   or   COM5 (Windows)   or
+#   udpin:0.0.0.0:14550       (if a GCS like Mission Planner forwards MAVLink)
+```
+Click a car in the browser and it aims the gimbal / orbits it. Good for testing,
+monitoring, and gimbal aim. The video-stream + radio round-trip adds latency, so
+it's not ideal for tight, fast follow.
+
+**B. Onboard companion (best for real follow, lowest latency).**
+A Raspberry Pi on the aircraft runs the tracker headless with the local camera
+and a direct serial link to the flight controller; your laptop just monitors.
+```bash
+# on the Pi (see PARTS.md for wiring)
+python3 tracker.py --headless --mavlink /dev/serial0 --baud 921600 --follow
+```
+The perception→command loop stays on the aircraft, so a dropped laptop/Wi-Fi
+link never affects control.
+
+**Sending commands from the laptop, either way:** the `--mavlink` connection
+string is the command channel. To a SiK radio use its serial port; to a shared
+GCS use `udpin:0.0.0.0:14550` (have Mission Planner/MAVProxy forward there). All
+the [safety gates](SAFETY.md) still apply — the aircraft only obeys Follow when
+armed and in GUIDED, and the pilot's RC always overrides.
 
 ## Web control panel
 

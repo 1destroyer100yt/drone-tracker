@@ -216,6 +216,66 @@ class TrackAssigner:
         return keys
 
 
+class ObjectFollower:
+    """Follows a single clicked object (a car, a bag, anything) with an OpenCV
+    CSRT tracker. Seeded from a click (a default-size box) or a drawn box, it
+    reports the box centre each frame and tolerates brief occlusions before
+    giving up. CSRT is the accurate OpenCV tracker; use KCF on weak CPUs."""
+
+    def __init__(self, box_size=80, max_lost=20, algo="CSRT"):
+        self.box_size = box_size
+        self.max_lost = max_lost
+        self.algo = algo
+        self.tracker = None
+        self.box = None            # (x, y, w, h) ints
+        self.lost = 0
+
+    @property
+    def active(self):
+        return self.tracker is not None
+
+    def _new_tracker(self):
+        if self.algo == "KCF" and hasattr(cv2, "TrackerKCF_create"):
+            return cv2.TrackerKCF_create()
+        return cv2.TrackerCSRT_create()
+
+    def start(self, frame, cx, cy, box=None):
+        """Begin tracking at pixel (cx, cy), or an explicit (x,y,w,h) box."""
+        h, w = frame.shape[:2]
+        if box is None:
+            s = self.box_size
+            box = (cx - s / 2, cy - s / 2, s, s)
+        x, y, bw, bh = box
+        x = int(max(0, min(x, w - 2)))
+        y = int(max(0, min(y, h - 2)))
+        bw = int(max(8, min(bw, w - x)))
+        bh = int(max(8, min(bh, h - y)))
+        self.tracker = self._new_tracker()
+        self.tracker.init(frame, (x, y, bw, bh))
+        self.box = (x, y, bw, bh)
+        self.lost = 0
+
+    def update(self, frame):
+        """Return the (cx, cy) centre of the tracked box, or None if lost."""
+        if self.tracker is None:
+            return None
+        ok, box = self.tracker.update(frame)
+        if ok:
+            self.box = tuple(int(v) for v in box)
+            self.lost = 0
+            x, y, bw, bh = self.box
+            return (x + bw / 2.0, y + bh / 2.0)
+        self.lost += 1
+        if self.lost > self.max_lost:
+            self.clear()
+        return None
+
+    def clear(self):
+        self.tracker = None
+        self.box = None
+        self.lost = 0
+
+
 class FrameGrabber:
     """Reads the camera in a background thread and always exposes the newest
     frame, dropping any the main loop was too busy to consume. Keeps end-to-end
@@ -314,6 +374,9 @@ def parse_args():
                          "how far a person is (default 0.40)")
     ap.add_argument("--units", choices=("metric", "imperial"), default="metric",
                     help="distance display units (imperial = feet and inches)")
+    ap.add_argument("--target-width", type=float, default=1.8,
+                    help="real width in metres of a clicked object, for its "
+                         "distance estimate (default 1.8 = a car)")
     # advanced flight: orbit-follow the target (opt-in, needs --mavlink)
     ap.add_argument("--follow", action="store_true",
                     help="ADVANCED: command the plane to ORBIT the tracked "
@@ -368,6 +431,8 @@ def main():
 
     smoother = PointSmoother()
     assigner = TrackAssigner()
+    follower = ObjectFollower()
+    obj_filter = None            # One-Euro pair for the object center
     hfov_rad = math.radians(args.hfov)
     imperial = args.units == "imperial"
     start = time.monotonic()
@@ -375,6 +440,30 @@ def main():
     last_t = start
     last_seq = -1
     last_report = start
+
+    # click-to-follow: left click picks an object (default box), left-drag
+    # draws a box, right click clears. Only in windowed mode.
+    WINDOW = "Body & Face Tracker  (q to quit)"
+    mouse = {}
+
+    def on_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            mouse["down"] = (x, y)
+            mouse["cur"] = (x, y)
+        elif event == cv2.EVENT_MOUSEMOVE and mouse.get("down"):
+            mouse["cur"] = (x, y)
+        elif event == cv2.EVENT_LBUTTONUP and mouse.get("down"):
+            x0, y0 = mouse.pop("down")
+            if abs(x - x0) < 8 and abs(y - y0) < 8:
+                mouse["click"] = (x, y)
+            else:
+                mouse["box"] = (min(x0, x), min(y0, y), abs(x - x0), abs(y - y0))
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            mouse["clear"] = True
+
+    if not args.headless:
+        cv2.namedWindow(WINDOW)
+        cv2.setMouseCallback(WINDOW, on_mouse)
 
     try:
         while not grabber.stopped:
@@ -424,24 +513,57 @@ def main():
                 dist_px = math.hypot(x - screen_center[0], y - screen_center[1])
                 tracked.append((x, y, label, dist_px, dist_m))
 
-            # the cross closest to the blue center cross is the GREEN target
+            # by default the GREEN target is the person closest to center
             closest_idx = min(range(len(tracked)), key=lambda i: tracked[i][3]) \
                 if tracked else None
-            closest_distance = tracked[closest_idx][3] \
-                if closest_idx is not None else None
-            closest_m = tracked[closest_idx][4] \
-                if closest_idx is not None else None
+
+            # --- click-to-follow object (car etc.) overrides the person pick ---
+            if mouse.pop("clear", False):
+                follower.clear()
+                obj_filter = None
+            boxsel = mouse.pop("box", None)
+            click = mouse.pop("click", None)
+            if boxsel is not None:
+                follower.start(frame, boxsel[0] + boxsel[2] / 2,
+                               boxsel[1] + boxsel[3] / 2, box=boxsel)
+                obj_filter = (OneEuroFilter(), OneEuroFilter())
+            elif click is not None:
+                follower.start(frame, click[0], click[1])
+                obj_filter = (OneEuroFilter(), OneEuroFilter())
+
+            obj_center = follower.update(frame) if follower.active else None
+            obj_m = None
+            if obj_center is not None:
+                ox, oy = obj_center
+                if obj_filter:
+                    ox, oy = obj_filter[0](t, ox), obj_filter[1](t, oy)
+                obj_center = (ox, oy)
+                bw_px = follower.box[2] if follower.box else 0
+                if bw_px > 1:
+                    obj_m = args.target_width * distance.focal_px(w, hfov_rad) / bw_px
+
+            # unified target: clicked object if present, else the closest person
+            if obj_center is not None:
+                target_xy, target_m = obj_center, obj_m
+                closest_idx = None          # people drawn red; object is green
+            elif closest_idx is not None:
+                target_xy = (tracked[closest_idx][0], tracked[closest_idx][1])
+                target_m = tracked[closest_idx][4]
+            else:
+                target_xy, target_m = None, None
+            target_px = math.hypot(target_xy[0] - screen_center[0],
+                                   target_xy[1] - screen_center[1]) \
+                if target_xy else None
 
             # --- UAV: aim the gimbal, and (if --follow) orbit the target ---
             follow_status = None
             if uav is not None:
                 uav.update_from_telemetry()
-                if closest_idx is not None:
-                    cx, cy, *_ = tracked[closest_idx]
-                    uav.send_gimbal((cx, cy), screen_center, (w, h))
+                if target_xy is not None:
+                    uav.send_gimbal(target_xy, screen_center, (w, h))
                     if args.follow:
                         follow_status = uav.follow_target(
-                            (cx, cy), screen_center, (w, h), range_m=closest_m)
+                            target_xy, screen_center, (w, h), range_m=target_m)
                 else:
                     uav.notify_no_target()
 
@@ -460,12 +582,35 @@ def main():
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1,
                                 cv2.LINE_AA)
 
+                # clicked object: green box + cross (the follow TARGET)
+                if obj_center is not None and follower.box is not None:
+                    bx, by, bw_, bh_ = follower.box
+                    cv2.rectangle(frame, (bx, by), (bx + bw_, by + bh_), GREEN, 2)
+                    draw_distance(frame, screen_center, obj_center)
+                    draw_cross(frame, obj_center[0], obj_center[1], GREEN)
+                    otag = f"TARGET d={target_px:.0f}px"
+                    if obj_m is not None:
+                        otag += f" ~{distance.fmt_distance(obj_m, imperial)}"
+                    cv2.putText(frame, otag, (bx, by - 6),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 1, cv2.LINE_AA)
+                elif follower.active:   # temporarily lost, show a hint
+                    cv2.putText(frame, "target lost...", (8, 62),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, RED, 1, cv2.LINE_AA)
+
+                # live drag rectangle while selecting
+                if mouse.get("down") and mouse.get("cur"):
+                    x0, y0 = mouse["down"]
+                    x1, y1 = mouse["cur"]
+                    cv2.rectangle(frame, (x0, y0), (x1, y1), WHITE, 1)
+
                 draw_cross(frame, *screen_center, BLUE, size=30)
                 hud = f"{fps:.0f} fps  [{args.model}]"
-                if closest_distance is not None:
-                    hud += f"  closest: {closest_distance:.0f}px"
-                if closest_m is not None:
-                    hud += f"  ~{distance.fmt_distance(closest_m, imperial)}"
+                if target_px is not None:
+                    lbl = "target" if obj_center is not None else "closest"
+                    hud += f"  {lbl}: {target_px:.0f}px"
+                if target_m is not None:
+                    hud += f"  ~{distance.fmt_distance(target_m, imperial)}"
+                hud += "   [click: follow object  right-click: clear]"
                 cv2.putText(frame, hud, (8, 20),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, WHITE, 1, cv2.LINE_AA)
                 if follow_status is not None:
@@ -473,14 +618,14 @@ def main():
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 1,
                                 cv2.LINE_AA)
 
-                cv2.imshow("Body & Face Tracker  (q to quit)", frame)
+                cv2.imshow(WINDOW, frame)
                 if (cv2.waitKey(1) & 0xFF) in (ord("q"), 27):
                     break
             elif now - last_report >= 2.0:  # headless: periodic status line
                 last_report = now
-                d = f"{closest_distance:.0f}px" if closest_distance else "none"
-                rng = f"  ~{distance.fmt_distance(closest_m, imperial)}" \
-                    if closest_m is not None else ""
+                d = f"{target_px:.0f}px" if target_px is not None else "none"
+                rng = f"  ~{distance.fmt_distance(target_m, imperial)}" \
+                    if target_m is not None else ""
                 extra = f"  follow:{follow_status}" if follow_status else ""
                 print(f"{fps:4.1f} fps  people:{len(pose_result.pose_landmarks)}"
                       f"  closest:{d}{rng}{extra}")
