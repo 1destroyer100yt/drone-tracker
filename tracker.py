@@ -312,6 +312,8 @@ def parse_args():
     ap.add_argument("--shoulder-width", type=float, default=0.40,
                     help="average shoulder width in metres, used to estimate "
                          "how far a person is (default 0.40)")
+    ap.add_argument("--units", choices=("metric", "imperial"), default="metric",
+                    help="distance display units (imperial = feet and inches)")
     # advanced flight: orbit-follow the target (opt-in, needs --mavlink)
     ap.add_argument("--follow", action="store_true",
                     help="ADVANCED: command the plane to ORBIT the tracked "
@@ -367,6 +369,7 @@ def main():
     smoother = PointSmoother()
     assigner = TrackAssigner()
     hfov_rad = math.radians(args.hfov)
+    imperial = args.units == "imperial"
     start = time.monotonic()
     fps = 0.0
     last_t = start
@@ -450,7 +453,7 @@ def main():
                     draw_cross(frame, x, y, color)
                     tag = f"{label} d={dist_px:.0f}px"
                     if dist_m is not None:
-                        tag += f" ~{dist_m:.1f}m"
+                        tag += f" ~{distance.fmt_distance(dist_m, imperial)}"
                     if is_closest:
                         tag += " CLOSEST"
                     cv2.putText(frame, tag, (int(x) + CROSS_SIZE + 4, int(y) + 4),
@@ -462,7 +465,7 @@ def main():
                 if closest_distance is not None:
                     hud += f"  closest: {closest_distance:.0f}px"
                 if closest_m is not None:
-                    hud += f"  ~{closest_m:.1f}m"
+                    hud += f"  ~{distance.fmt_distance(closest_m, imperial)}"
                 cv2.putText(frame, hud, (8, 20),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, WHITE, 1, cv2.LINE_AA)
                 if follow_status is not None:
@@ -476,7 +479,8 @@ def main():
             elif now - last_report >= 2.0:  # headless: periodic status line
                 last_report = now
                 d = f"{closest_distance:.0f}px" if closest_distance else "none"
-                rng = f"  ~{closest_m:.1f}m" if closest_m is not None else ""
+                rng = f"  ~{distance.fmt_distance(closest_m, imperial)}" \
+                    if closest_m is not None else ""
                 extra = f"  follow:{follow_status}" if follow_status else ""
                 print(f"{fps:4.1f} fps  people:{len(pose_result.pose_landmarks)}"
                       f"  closest:{d}{rng}{extra}")

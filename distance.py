@@ -28,6 +28,22 @@ L_SHOULDER, R_SHOULDER = 11, 12
 L_EYE, R_EYE = 2, 5
 
 
+def fmt_distance(m, imperial=False):
+    """Format a distance in metres for display. imperial -> feet and inches
+    (e.g. '10ft 6in'); metric -> metres (e.g. '3.2m'). None -> None."""
+    if m is None:
+        return None
+    if imperial:
+        total_in = m * 39.37007874
+        ft = int(total_in // 12)
+        inch = int(round(total_in - ft * 12))
+        if inch == 12:            # rounding pushed inches to a full foot
+            ft += 1
+            inch = 0
+        return f"{ft}ft {inch}in"
+    return f"{m:.1f}m"
+
+
 def focal_px(image_width, hfov_rad):
     """Focal length in pixels from image width and horizontal FOV."""
     return (image_width / 2.0) / math.tan(hfov_rad / 2.0)

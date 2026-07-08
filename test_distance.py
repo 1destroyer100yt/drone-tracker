@@ -69,6 +69,18 @@ def test_eye_fallback():
     print(f"eye fallback OK: measured {d:.3f} m at true 1.5 m")
 
 
+def test_fmt():
+    assert distance.fmt_distance(3.2) == "3.2m"
+    assert distance.fmt_distance(None) is None
+    # 3.2 m = 125.98 in = 10 ft 6 in
+    assert distance.fmt_distance(3.2, imperial=True) == "10ft 6in"
+    # 0.3048 m = exactly 1 ft 0 in
+    assert distance.fmt_distance(0.3048, imperial=True) == "1ft 0in"
+    # rounding that would hit 12 in rolls to the next foot
+    assert distance.fmt_distance(0.999 * 12 * 0.0254, imperial=True) == "1ft 0in"
+    print("fmt_distance OK: metric + feet/inches + rounding rollover")
+
+
 def test_nothing_visible():
     w, h, hfov = 640, 480, math.radians(62.2)
     pose = make_pose(shoulder_vis=0.0, eye_vis=0.0)  # nothing usable
@@ -80,5 +92,6 @@ if __name__ == "__main__":
     test_focal()
     test_shoulder_distance()
     test_eye_fallback()
+    test_fmt()
     test_nothing_visible()
     print("\nALL DISTANCE TESTS PASSED")

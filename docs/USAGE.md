@@ -34,7 +34,9 @@ distance, and a **`~N.Nm` real-world distance** estimate per person. Press
 
 **Distance:** estimated from shoulder width via the pinhole model; tune with
 `--shoulder-width 0.40` (metres) if your subjects differ. It's a ±15-20%
-estimate — see [SAFETY.md](SAFETY.md).
+estimate — see [SAFETY.md](SAFETY.md). Show it in **feet and inches** with
+`--units imperial` (default `metric`); the web panel has a **Units: m/ft**
+toggle. Internals stay metric — only the display changes.
 
 ### With a UAV
 ```bash

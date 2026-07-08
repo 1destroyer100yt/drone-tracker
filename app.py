@@ -47,6 +47,7 @@ class TrackerEngine:
         self.mirror = False
         self.num_poses = 1
         self.follow = False
+        self.units = "metric"        # or "imperial" (feet + inches)
 
         self.jpeg = None
         self.status = {"fps": 0.0, "people": 0, "closest": None,
@@ -220,7 +221,8 @@ class TrackerEngine:
                 T.draw_cross(frame, x, y, color)
                 tag = f"{label} d={d:.0f}px"
                 if dist_m is not None:
-                    tag += f" ~{dist_m:.1f}m"
+                    tag += " ~" + distance.fmt_distance(
+                        dist_m, self.units == "imperial")
                 if is_c:
                     tag += " CLOSEST"
                 cv2.putText(frame, tag, (int(x) + T.CROSS_SIZE + 4, int(y) + 4),
@@ -253,7 +255,8 @@ class TrackerEngine:
         return dict(id=self.eid, source=self.source, label=self.label(),
                     running=self.running, model=self.model, mirror=self.mirror,
                     num_poses=self.num_poses, mavlink=self.status["mavlink"],
-                    follow=self.follow, score=self.status["score"],
+                    follow=self.follow, units=self.units,
+                    score=self.status["score"],
                     status=self.status, events=list(self.events))
 
 
@@ -456,8 +459,10 @@ PAGE = r"""
      <button data-poses="2" onclick="setPoses(2)">2</button>
      <button data-poses="3" onclick="setPoses(3)">3</button>
      <button data-poses="4" onclick="setPoses(4)">4</button></div>
-   <div class="row"><button id="mirrorBtn" style="flex:1"
-     onclick="toggleMirror()">Mirror: off</button></div>
+   <div class="row">
+     <button id="mirrorBtn" style="flex:1" onclick="toggleMirror()">Mirror: off</button>
+     <button id="unitsBtn" style="flex:1" onclick="toggleUnits()">Units: m</button>
+   </div>
   </div>
   <div class="card">
    <h2>UAV (ArduPilot)</h2>
@@ -489,7 +494,7 @@ PAGE = r"""
    <div class="stat"><div class="v" id="s_fps">–</div><div class="k">fps</div></div>
    <div class="stat"><div class="v" id="s_people">–</div><div class="k">people</div></div>
    <div class="stat"><div class="v" id="s_closest">–</div><div class="k">closest px</div></div>
-   <div class="stat"><div class="v" id="s_range">–</div><div class="k">distance m</div></div>
+   <div class="stat"><div class="v" id="s_range">–</div><div class="k">distance</div></div>
    <div class="stat"><div class="v" id="s_mav">off</div><div class="k">mavlink</div></div>
   </div>
   <div class="grid" id="grid"></div>
@@ -534,6 +539,12 @@ function toggleRun(){const e=cur(); if(e)ctl(e.running?'stop':'start');}
 function setModel(m){ctl('set_model',m);}
 function setPoses(n){ctl('set_poses',n);}
 function toggleMirror(){const e=cur(); if(e)ctl('set_mirror',!e.mirror);}
+function toggleUnits(){const e=cur(); if(e)ctl('set_units',e.units==='imperial'?'metric':'imperial');}
+function fmtM(m,imperial){
+  if(m==null)return '–';
+  if(!imperial)return m.toFixed(1)+'m';
+  let ti=m*39.37007874, ft=Math.floor(ti/12), inch=Math.round(ti-ft*12);
+  if(inch===12){ft++;inch=0;} return ft+'ft '+inch+'in';}
 function toggleMav(){const e=cur(); if(!e)return;
   const c=(e.mavlink==='connected'||e.mavlink==='no heartbeat');
   ctl(c?'disconnect_mavlink':'connect_mavlink',
@@ -580,6 +591,9 @@ function render(){
   document.getElementById('livedot').className='dot'+(has&&e.running?' on':'');
   document.getElementById('mirrorBtn').textContent='Mirror: '+(has&&e.mirror?'on':'off');
   document.getElementById('mirrorBtn').className=has&&e.mirror?'on':'';
+  const imp=has&&e.units==='imperial';
+  document.getElementById('unitsBtn').textContent='Units: '+(imp?'ft':'m');
+  document.getElementById('unitsBtn').className=imp?'on':'';
   document.querySelectorAll('[data-model]').forEach(b=>
     b.className=has&&b.dataset.model===e.model?'on':'');
   document.querySelectorAll('[data-poses]').forEach(b=>
@@ -595,7 +609,7 @@ function render(){
   document.getElementById('s_closest').textContent=
      has&&e.status.closest!=null?e.status.closest:'–';
   document.getElementById('s_range').textContent=
-     has&&e.status.range_m!=null?e.status.range_m:'–';
+     has?fmtM(e.status.range_m,imp):'–';
   document.getElementById('s_mav').textContent=has?e.mavlink:'off';
   let hs=`${engines.length} camera${engines.length!==1?'s':''}`;
   if(e&&e.status.follow)hs+=' · follow: '+e.status.follow;
@@ -682,6 +696,8 @@ def control():
         eng.num_poses = max(1, min(4, int(value)))
     elif action == "set_mirror":
         eng.mirror = bool(value)
+    elif action == "set_units" and value in ("metric", "imperial"):
+        eng.units = value
     elif action == "connect_mavlink":
         eng.connect_mavlink(str(value))
     elif action == "disconnect_mavlink":
