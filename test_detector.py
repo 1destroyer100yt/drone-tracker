@@ -235,6 +235,30 @@ def test_coreml_backend():
     print(f"coreml backend: OK  (ANE, {len(d.names)} classes)")
 
 
+def test_parse_tiles():
+    from detector import parse_tiles
+    assert parse_tiles(None) is None and parse_tiles("") is None
+    assert parse_tiles("2x3") == (2, 3)
+    assert parse_tiles("4") == (4, 4)
+    print("parse_tiles: OK")
+
+
+def test_tiled_detector():
+    """TiledDetector wraps a base detector, keeps the shared interface, and
+    runs (uses the bundled nano ONNX; skipped if absent)."""
+    if not os.path.exists(MODEL):
+        print("tiled detector: SKIP (model not present)")
+        return
+    from detector import build_detector, TiledDetector, parse_tiles
+    d = build_detector(MODEL, conf=0.25, tiles=parse_tiles("2x2"))
+    assert isinstance(d, TiledDetector)
+    assert d.class_id("car") == 3 and len(d.names) == 10
+    out = d.detect(np.zeros((480, 640, 3), np.uint8))
+    assert isinstance(out, list)
+    assert hasattr(d, "best_match") and hasattr(d, "pick_at")
+    print("tiled detector: OK  (2x2 grid, shares base interface)")
+
+
 def main():
     test_geometry()
     test_snap_on_start()
@@ -245,6 +269,8 @@ def main():
     test_best_match_distance_gate()
     test_build_detector_dispatch()
     test_coreml_backend()
+    test_parse_tiles()
+    test_tiled_detector()
     print("\nall detector tests passed.")
 
 

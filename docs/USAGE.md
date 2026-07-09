@@ -101,6 +101,14 @@ real-time. On a Mac the bare `--detector` flag picks this automatically when the
 (CoreML is macOS-only; on a Pi/Linux use the ONNX models). Parity with the ONNX
 model is exact (matching boxes at IoU ≥ 0.7).
 
+**Tiled inference for dense / high-res frames:** `--detect-tiles 2x2` runs the
+detector on an overlapping grid (plus a full-frame pass) and merges with NMS, so
+small objects lost when a big frame is squished to 640×640 are recovered. On a
+crowded 1080p aerial frame this found **~35–40% more** objects (mostly small
+pedestrians/motorbikes) at ~1.5× the cost. Use `CxR` (`3x2` for a wide frame,
+`2x3` for a tall one). It only helps genuinely dense scenes — it won't invent
+objects in sparse footage.
+
 **Distance:** estimated from shoulder width via the pinhole model; tune with
 `--shoulder-width 0.40` (metres) if your subjects differ. It's a ±15-20%
 estimate — see [SAFETY.md](SAFETY.md). Show it in **feet and inches** with

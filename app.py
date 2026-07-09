@@ -861,13 +861,17 @@ def main():
                     help="frames between detector re-locks (default 15)")
     ap.add_argument("--detect-conf", type=float, default=0.25,
                     help="detector confidence threshold (default 0.25)")
+    ap.add_argument("--detect-tiles", default=None, metavar="CxR",
+                    help="run detection on an overlapping CxR tile grid (e.g. "
+                         "2x3) to recover small objects in high-res/4K frames")
     args = ap.parse_args()
 
     if args.detector:
-        from detector import build_detector, default_model_path
+        from detector import build_detector, default_model_path, parse_tiles
         model_path = default_model_path(T.MODEL_DIR) if args.detector == "auto" \
             else args.detector
-        det = build_detector(model_path, conf=args.detect_conf)
+        det = build_detector(model_path, conf=args.detect_conf,
+                             tiles=parse_tiles(args.detect_tiles))
         classes = None
         if args.detect_classes:
             ids = []

@@ -505,6 +505,10 @@ def parse_args():
                     help="frames between detector re-locks (default 15)")
     ap.add_argument("--detect-conf", type=float, default=0.25,
                     help="detector confidence threshold (default 0.25)")
+    ap.add_argument("--detect-tiles", default=None, metavar="CxR",
+                    help="run detection on an overlapping CxR tile grid (e.g. "
+                         "2x3) to recover small objects in high-res/4K frames; "
+                         "slower (~tiles+1 inferences per frame)")
     # advanced flight: orbit-follow the target (opt-in, needs --mavlink)
     ap.add_argument("--follow", action="store_true",
                     help="ADVANCED: command the plane to ORBIT the tracked "
@@ -561,11 +565,12 @@ def main():
     detector = None
     target_classes = None
     if args.detector:
-        from detector import build_detector, default_model_path
+        from detector import build_detector, default_model_path, parse_tiles
         model_path = default_model_path(MODEL_DIR) if args.detector == "auto" \
             else args.detector
         print(f"Detector: loading {model_path} ...")
-        detector = build_detector(model_path, conf=args.detect_conf)
+        detector = build_detector(model_path, conf=args.detect_conf,
+                                  tiles=parse_tiles(args.detect_tiles))
         if args.detect_classes:
             ids = []
             for tok in args.detect_classes.split(","):

@@ -70,13 +70,29 @@ def default_model_path(models_dir):
     return os.path.join(models_dir, "visdrone_n.onnx")
 
 
-def build_detector(path, conf=0.25, iou=0.45):
+def build_detector(path, conf=0.25, iou=0.45, tiles=None):
     """Construct the right detector backend for a model path by extension:
-    .mlpackage/.mlmodel -> CoreML (ANE), anything else -> ONNX Runtime."""
+    .mlpackage/.mlmodel -> CoreML (ANE), anything else -> ONNX Runtime. If
+    `tiles` (cols, rows) is given, wrap it in a TiledDetector for high-res
+    frames."""
     if path.endswith((".mlpackage", ".mlmodel")):
         from coreml_detector import CoreMLDetector
-        return CoreMLDetector(path, conf=conf, iou=iou)
-    return YoloOnnxDetector(path, conf=conf, iou=iou)
+        base = CoreMLDetector(path, conf=conf, iou=iou)
+    else:
+        base = YoloOnnxDetector(path, conf=conf, iou=iou)
+    return TiledDetector(base, tiles=tiles) if tiles else base
+
+
+def parse_tiles(spec):
+    """'2x3' -> (2, 3) cols x rows; 'N' -> (N, N); None/'' -> None."""
+    if not spec:
+        return None
+    spec = str(spec).lower().replace(" ", "")
+    if "x" in spec:
+        c, r = spec.split("x")
+        return (int(c), int(r))
+    n = int(spec)
+    return (n, n)
 
 
 class _DetectorBase:
@@ -257,3 +273,54 @@ class YoloOnnxDetector(_DetectorBase):
                 for i in idx]
         dets.sort(key=lambda d: d.conf, reverse=True)
         return dets
+
+
+class TiledDetector(_DetectorBase):
+    """Wraps a base detector and runs it on an overlapping grid of tiles plus a
+    full-frame pass, merging results with per-class NMS. Recovers small objects
+    in high-resolution frames that get lost when the whole frame is squished to
+    the network's 640x640 input. Cost scales with the tile count (tiles + 1
+    detector calls per frame), so it's a quality/speed trade for high-altitude
+    or 4K footage rather than a real-time default."""
+
+    def __init__(self, base, tiles=(2, 2), overlap=0.2):
+        self.base = base
+        self.names = base.names
+        self.conf = base.conf
+        self.iou = base.iou
+        self.in_w = base.in_w
+        self.in_h = base.in_h
+        self.cols, self.rows = tiles
+        self.overlap = overlap
+
+    def class_id(self, name):
+        return self.base.class_id(name)
+
+    def detect(self, frame, classes=None):
+        h, w = frame.shape[:2]
+        dets = list(self.base.detect(frame, classes=classes))   # full frame
+        tw, th = w / self.cols, h / self.rows
+        ox, oy = tw * self.overlap, th * self.overlap
+        for r in range(self.rows):
+            for c in range(self.cols):
+                x0, y0 = int(max(0, c * tw - ox)), int(max(0, r * th - oy))
+                x1 = int(min(w, (c + 1) * tw + ox))
+                y1 = int(min(h, (r + 1) * th + oy))
+                crop = frame[y0:y1, x0:x1]
+                if crop.size == 0:
+                    continue
+                for d in self.base.detect(crop, classes=classes):
+                    dets.append(d._replace(x=d.x + x0, y=d.y + y0))
+        if not dets:
+            return []
+        # per-class NMS to merge duplicates from the overlapping tiles
+        final = []
+        for cls in set(d.cls for d in dets):
+            g = [d for d in dets if d.cls == cls]
+            boxes = [[d.x, d.y, d.w, d.h] for d in g]
+            scores = [d.conf for d in g]
+            idx = cv2.dnn.NMSBoxes(boxes, scores, self.conf, self.iou)
+            for i in (np.array(idx).flatten() if len(idx) else []):
+                final.append(g[i])
+        final.sort(key=lambda d: d.conf, reverse=True)
+        return final
