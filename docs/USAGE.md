@@ -66,6 +66,27 @@ On clean synthetic video CSRT is the most accurate and DroTrack the fastest;
 DroTrack's advantage is real aerial footage with camera ego-motion, so benchmark
 on your own clips before choosing.
 
+**Detection-assisted follow (recommended for drone footage):** add `--detector`
+to back the click-tracker with our VisDrone-trained YOLOv8 model
+(`models/visdrone_n.onnx`, run via ONNX Runtime — no PyTorch needed):
+
+```bash
+python3 tracker.py --detector                       # uses models/visdrone_n.onnx
+python3 tracker.py --detector --detect-classes car,van,truck,bus
+python3 tracker.py --detector models/visdrone_m.onnx --detect-interval 10
+```
+
+With a detector the click **snaps onto the detected object box** (not a fixed
+square), the tracker **re-locks to a fresh detection every `--detect-interval`
+frames** so it can't slowly drift onto the background, and — crucially — when the
+object truly leaves the frame the follower **reports the target LOST** instead of
+confidently tracking nothing. That's the fix for the silent-drift failure the
+plain trackers show on real aerial clips. Restrict targets with
+`--detect-classes` (names or ids: pedestrian, people, bicycle, car, van, truck,
+tricycle, awning-tricycle, bus, motor). Install the optional dep with
+`pip install onnxruntime`. Once yolov8m finishes training, drop in its
+`best.onnx` the same way for higher accuracy.
+
 **Distance:** estimated from shoulder width via the pinhole model; tune with
 `--shoulder-width 0.40` (metres) if your subjects differ. It's a ±15-20%
 estimate — see [SAFETY.md](SAFETY.md). Show it in **feet and inches** with

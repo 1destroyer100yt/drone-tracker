@@ -220,15 +220,38 @@ class ObjectFollower:
     """Follows a single clicked object (a car, a bag, anything) with an OpenCV
     CSRT tracker. Seeded from a click (a default-size box) or a drawn box, it
     reports the box centre each frame and tolerates brief occlusions before
-    giving up. CSRT is the accurate OpenCV tracker; use KCF on weak CPUs."""
+    giving up. CSRT is the accurate OpenCV tracker; use KCF on weak CPUs.
 
-    def __init__(self, box_size=80, max_lost=20, algo="CSRT"):
+    Optionally takes a YoloOnnxDetector. With one, the follower gets far more
+    reliable:
+      - a click/box locks onto the *actual* detected object box, not a fixed
+        square, and remembers that object's class;
+      - every `detect_interval` frames (and whenever CSRT fails) it re-locks the
+        tracker to a fresh detection of that class, so it can't slowly drift
+        onto the background;
+      - if the detector can't find the object for `max_detect_misses` detection
+        cycles in a row, it declares the target LOST instead of confidently
+        tracking nothing (confidence-gated loss reporting).
+    Without a detector it behaves exactly as before (pure CSRT/KCF/DroTrack)."""
+
+    def __init__(self, box_size=80, max_lost=20, algo="CSRT", detector=None,
+                 detect_interval=15, match_iou=0.2, target_classes=None,
+                 max_detect_misses=3):
         self.box_size = box_size
         self.max_lost = max_lost
         self.algo = algo
+        self.detector = detector
+        self.detect_interval = max(1, detect_interval)
+        self.match_iou = match_iou
+        self.target_classes = target_classes    # allowed class ids, or None
+        self.max_detect_misses = max_detect_misses
         self.tracker = None
         self.box = None            # (x, y, w, h) ints
         self.lost = 0
+        self.frame_i = 0
+        self.det_misses = 0
+        self.cls = None            # locked object's class id (from detector)
+        self.score = None          # last detection confidence
 
     @property
     def active(self):
@@ -242,17 +265,18 @@ class ObjectFollower:
             return DroTrackCV()
         return cv2.TrackerCSRT_create()
 
-    def start(self, frame, cx, cy, box=None):
-        """Begin tracking at pixel (cx, cy), or an explicit (x,y,w,h) box."""
-        h, w = frame.shape[:2]
-        if box is None:
-            s = self.box_size
-            box = (cx - s / 2, cy - s / 2, s, s)
+    def _clip_box(self, box, w, h):
         x, y, bw, bh = box
         x = int(max(0, min(x, w - 2)))
         y = int(max(0, min(y, h - 2)))
         bw = int(max(8, min(bw, w - x)))
         bh = int(max(8, min(bh, h - y)))
+        return x, y, bw, bh
+
+    def _init_tracker(self, frame, box):
+        """(Re)create the tracker locked to box. Returns True on success."""
+        h, w = frame.shape[:2]
+        x, y, bw, bh = self._clip_box(box, w, h)
         self.tracker = self._new_tracker()
         try:
             res = self.tracker.init(frame, (x, y, bw, bh))
@@ -263,28 +287,102 @@ class ObjectFollower:
             self.box = None
             return False
         self.box = (x, y, bw, bh)
-        self.lost = 0
         return True
+
+    def _cls_filter(self):
+        if self.cls is not None:
+            return {self.cls}
+        return self.target_classes
+
+    def start(self, frame, cx, cy, box=None):
+        """Begin tracking at pixel (cx, cy), or an explicit (x,y,w,h) box.
+        With a detector, snap onto the detected object under the click/box."""
+        self.cls = None
+        self.score = None
+        if self.detector is not None:
+            try:
+                if box is not None:
+                    det = self.detector.best_match(
+                        frame, box, classes=self.target_classes, min_iou=0.1)
+                else:
+                    det = self.detector.pick_at(
+                        frame, cx, cy, classes=self.target_classes)
+            except Exception:
+                det = None
+            if det is not None:
+                box = (det.x, det.y, det.w, det.h)
+                self.cls = det.cls
+                self.score = det.conf
+        if box is None:
+            s = self.box_size
+            box = (cx - s / 2, cy - s / 2, s, s)
+        if not self._init_tracker(frame, box):
+            return False
+        self.lost = 0
+        self.frame_i = 0
+        self.det_misses = 0
+        return True
+
+    def _redetect(self, frame):
+        """Try to re-lock onto a fresh detection of the tracked object.
+        Returns the (cx, cy) centre on success, or None. On repeated failure it
+        declares the target lost and clears."""
+        try:
+            match = self.detector.best_match(
+                frame, self.box, classes=self._cls_filter(),
+                min_iou=self.match_iou)
+        except Exception:
+            match = None
+        if match is not None:
+            if self._init_tracker(frame, (match.x, match.y, match.w, match.h)):
+                self.lost = 0
+                self.det_misses = 0
+                self.score = match.conf
+                x, y, bw, bh = self.box
+                return (x + bw / 2.0, y + bh / 2.0)
+        self.det_misses += 1
+        if self.det_misses >= self.max_detect_misses:
+            self.clear()
+        return None
 
     def update(self, frame):
         """Return the (cx, cy) centre of the tracked box, or None if lost."""
         if self.tracker is None:
             return None
         ok, box = self.tracker.update(frame)
+        center = None
         if ok:
             self.box = tuple(int(v) for v in box)
             self.lost = 0
             x, y, bw, bh = self.box
-            return (x + bw / 2.0, y + bh / 2.0)
-        self.lost += 1
-        if self.lost > self.max_lost:
+            center = (x + bw / 2.0, y + bh / 2.0)
+        else:
+            self.lost += 1
+
+        if self.detector is not None:
+            self.frame_i += 1
+            # re-lock on a schedule, or immediately if CSRT lost the object
+            if not ok or self.frame_i % self.detect_interval == 0:
+                relock = self._redetect(frame)
+                if relock is not None:
+                    return relock
+                if self.tracker is None:      # _redetect declared it lost
+                    return None
+            return center                     # None if CSRT is between fixes
+
+        # no detector: original brief-occlusion tolerance
+        if not ok and self.lost > self.max_lost:
             self.clear()
-        return None
+        return center
 
     def clear(self):
         self.tracker = None
         self.box = None
         self.lost = 0
+        self.frame_i = 0
+        self.det_misses = 0
+        self.cls = None
+        self.score = None
 
 
 class FrameGrabber:
@@ -392,6 +490,20 @@ def parse_args():
                     default="CSRT",
                     help="click-to-follow tracker: CSRT (accurate), KCF "
                          "(faster), or DROTRACK (drone-tuned, TF-free)")
+    ap.add_argument("--detector", nargs="?", const="models/visdrone_n.onnx",
+                    default=None, metavar="ONNX",
+                    help="enable detection-assisted follow with a YOLOv8 ONNX "
+                         "model (bare flag uses models/visdrone_n.onnx). Snaps "
+                         "the click onto the detected box and re-locks the "
+                         "tracker to fresh detections, reporting a real loss "
+                         "when the object is gone instead of drifting")
+    ap.add_argument("--detect-classes", default=None, metavar="LIST",
+                    help="comma-separated class names or ids to allow as "
+                         "targets, e.g. car,van,truck,bus (default: any)")
+    ap.add_argument("--detect-interval", type=int, default=15,
+                    help="frames between detector re-locks (default 15)")
+    ap.add_argument("--detect-conf", type=float, default=0.25,
+                    help="detector confidence threshold (default 0.25)")
     # advanced flight: orbit-follow the target (opt-in, needs --mavlink)
     ap.add_argument("--follow", action="store_true",
                     help="ADVANCED: command the plane to ORBIT the tracked "
@@ -444,9 +556,34 @@ def main():
     if args.follow and not uav:
         raise SystemExit("--follow requires --mavlink")
 
+    # optional ONNX detector for detection-assisted, drift-proof following
+    detector = None
+    target_classes = None
+    if args.detector:
+        from detector import YoloOnnxDetector
+        print(f"Detector: loading {args.detector} ...")
+        detector = YoloOnnxDetector(args.detector, conf=args.detect_conf)
+        if args.detect_classes:
+            ids = []
+            for tok in args.detect_classes.split(","):
+                tok = tok.strip()
+                if not tok:
+                    continue
+                cid = int(tok) if tok.isdigit() else detector.class_id(tok)
+                if cid is None:
+                    print(f"  warning: unknown class {tok!r}, ignoring")
+                else:
+                    ids.append(cid)
+            target_classes = set(ids) or None
+        names = [detector.names.get(c, c) for c in (target_classes or [])]
+        print(f"Detector: ready ({len(detector.names)} classes)"
+              + (f", targets: {', '.join(map(str, names))}" if names else ""))
+
     smoother = PointSmoother()
     assigner = TrackAssigner()
-    follower = ObjectFollower(algo=args.tracker)
+    follower = ObjectFollower(algo=args.tracker, detector=detector,
+                              detect_interval=args.detect_interval,
+                              target_classes=target_classes)
     obj_filter = None            # One-Euro pair for the object center
     hfov_rad = math.radians(args.hfov)
     imperial = args.units == "imperial"

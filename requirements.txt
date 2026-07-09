@@ -7,6 +7,7 @@ mediapipe==0.10.35
 pymavlink==2.4.49
 flask==3.1.3
 scipy>=1.10        # used by the vendored DroTrack object tracker (third_party/)
+onnxruntime>=1.16  # optional: --detector (detection-assisted, drift-proof follow)
 
 # numpy is pulled in by opencv/mediapipe; left unpinned so their resolver
 # picks a compatible build.
