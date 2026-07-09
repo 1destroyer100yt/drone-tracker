@@ -23,3 +23,8 @@ models/visdrone_m.onnx
 models/visdrone_m.mlpackage/
 # raw Colab training run dumped into the repo (weights already copied to models/)
 visdrone_m/
+
+# generated demo clip
+demo_aerial.mp4
+
+demo_car_follow.mp4
