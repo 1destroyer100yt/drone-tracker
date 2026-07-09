@@ -131,11 +131,44 @@ def test_real_model():
     print(f"real model: OK  (10 classes, ran a frame, {len(dets)} spurious dets)")
 
 
+def test_nms_format_output():
+    """The end-to-end (nms=True) export gives [1, N, 6] = x1,y1,x2,y2,conf,cls.
+    Feed a crafted one through the real detector's session and check it decodes
+    and un-letterboxes correctly (this is the yolov8m export format)."""
+    if not os.path.exists(MODEL):
+        print("nms-format output: SKIP (model not present)")
+        return
+    from detector import YoloOnnxDetector
+    d = YoloOnnxDetector(MODEL)
+
+    class FakeSess:
+        def __init__(self, out):
+            self.out = out
+        def run(self, *a, **k):
+            return [self.out]
+
+    # 640x480 frame -> letterbox r=1.0, px=0, py=80. A car box at 640-space
+    # (50,60)-(150,160), plus a zero-padded row that must be dropped.
+    out = np.array([[[50, 60, 150, 160, 0.9, 3],
+                     [0, 0, 0, 0, 0, 0]]], np.float32)
+    d.session = FakeSess(out)
+    dets = d.detect(np.zeros((480, 640, 3), np.uint8))
+    assert len(dets) == 1, dets
+    det = dets[0]
+    assert det.name == "car" and approx(det.conf, 0.9, 1e-4)
+    assert approx(det.x, 50) and approx(det.y, -20)      # (60 - py=80)/r
+    assert approx(det.w, 100) and approx(det.h, 100)
+    # class filter still works on this format
+    assert d.detect(np.zeros((480, 640, 3), np.uint8), classes={0}) == []
+    print("nms-format output: OK  (end2end [N,6] decoded + unletterboxed)")
+
+
 def main():
     test_geometry()
     test_snap_on_start()
     test_confidence_gated_loss()
     test_real_model()
+    test_nms_format_output()
     print("\nall detector tests passed.")
 
 

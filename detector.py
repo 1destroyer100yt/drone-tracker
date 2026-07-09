@@ -106,16 +106,49 @@ class YoloOnnxDetector:
         tensor = tensor.transpose(2, 0, 1)[None]        # 1,3,H,W
         return np.ascontiguousarray(tensor), r, px, py
 
+    def _mk(self, x, y, w, h, conf, cls):
+        cls = int(cls)
+        return Detection(float(x), float(y), float(w), float(h), float(conf),
+                         cls, self.names.get(cls, str(cls)))
+
     def detect(self, frame, classes=None):
         """Detect objects in a BGR frame.
+
+        Handles both YOLOv8 ONNX output layouts:
+          - raw head (exported nms=False): [1, 4+nc, 8400] -> we decode + NMS
+          - end-to-end (exported nms=True): [1, N, 6] = x1,y1,x2,y2,conf,cls,
+            already NMS'd, so we just filter and rescale.
 
         classes: optional iterable of class ids to keep (others dropped).
         Returns a list of Detection, highest confidence first.
         """
         tensor, r, px, py = self._letterbox(frame)
         out = self.session.run(None, {self.input_name: tensor})[0]
-        # [1, 4+nc, 8400] -> [8400, 4+nc]
-        preds = np.squeeze(out, 0).T
+        arr = np.squeeze(out, 0)
+        classes = set(int(c) for c in classes) if classes is not None else None
+
+        # --- end-to-end (NMS baked in): [N, 6] = x1,y1,x2,y2,conf,cls ---
+        if arr.ndim == 2 and arr.shape[1] == 6 and arr.shape[0] != 6:
+            confs = arr[:, 4].astype(np.float32)
+            cls_ids = arr[:, 5].astype(np.int32)
+            keep = confs >= self.conf
+            if classes is not None:
+                keep &= np.array([int(c) in classes for c in cls_ids])
+            if not np.any(keep):
+                return []
+            b = arr[keep]
+            confs = confs[keep]
+            cls_ids = cls_ids[keep]
+            x = (b[:, 0] - px) / r
+            y = (b[:, 1] - py) / r
+            w = (b[:, 2] - b[:, 0]) / r
+            h = (b[:, 3] - b[:, 1]) / r
+            order = np.argsort(-confs)          # already NMS'd; sort by conf
+            return [self._mk(x[i], y[i], w[i], h[i], confs[i], cls_ids[i])
+                    for i in order]
+
+        # --- raw head: [4+nc, 8400] (or transposed); decode + NMS ourselves ---
+        preds = arr.T if arr.shape[0] < arr.shape[1] else arr
         boxes_xywh = preds[:, :4]
         scores_all = preds[:, 4:]
         cls_ids = np.argmax(scores_all, axis=1)
@@ -123,8 +156,7 @@ class YoloOnnxDetector:
 
         keep = confs >= self.conf
         if classes is not None:
-            classes = set(int(c) for c in classes)
-            keep &= np.array([c in classes for c in cls_ids])
+            keep &= np.array([int(c) in classes for c in cls_ids])
         if not np.any(keep):
             return []
         boxes_xywh = boxes_xywh[keep]
@@ -144,9 +176,7 @@ class YoloOnnxDetector:
         if len(idx) == 0:
             return []
         idx = np.array(idx).flatten()
-        dets = [Detection(float(x[i]), float(y[i]), float(w[i]), float(h[i]),
-                          float(confs[i]), int(cls_ids[i]),
-                          self.names.get(int(cls_ids[i]), str(int(cls_ids[i]))))
+        dets = [self._mk(x[i], y[i], w[i], h[i], confs[i], cls_ids[i])
                 for i in idx]
         dets.sort(key=lambda d: d.conf, reverse=True)
         return dets
