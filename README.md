@@ -33,10 +33,15 @@ intersection, running on the Apple Neural Engine.</sub>
 
 ## Demo
 
-![Following a moving vehicle](assets/follow-car.jpg)
-<sub>Detection-assisted follow: the green box locks the moving car, the white
-line to the blue screen-centre cross is the tracking error that drives the
-gimbal / orbit command; a pedestrian is detected at the same time.</sub>
+![Follow in action](assets/follow-demo.gif)
+<sub>Detection-assisted following on the Neural Engine: the green box stays
+locked on the moving car while every vehicle and pedestrian is detected live.
+The white line to the blue centre cross is the tracking error that drives the
+gimbal / orbit command.</sub>
+
+![Following a moving vehicle on real drone footage](assets/follow-car.jpg)
+<sub>The same pipeline on real drone footage — one target held through a scene
+with other vehicles and a pedestrian, with live speed and size readouts.</sub>
 
 ## Results
 
