@@ -1,84 +1,132 @@
-# Body & Face Tracker — person-following camera UAV
+# Drone Vision — Real-Time Aerial Person & Vehicle Tracking and Following
 
-A Python tracker that finds people with MediaPipe, marks each with a cross,
-measures pixel distance to screen center, and can aim a camera gimbal at — or
-fly a fixed-wing plane to orbit — the closest person. Runs on a laptop or a
-Raspberry Pi, with a CLI, a web control panel, and an ArduPilot integration.
+An end-to-end computer-vision system for drones: it **detects** people and
+vehicles from an aerial view with a custom-trained YOLOv8 model, **follows** a
+chosen target through clutter and brief occlusions, measures its **speed and
+size**, and can aim a camera gimbal or command an ArduPilot aircraft to orbit
+it — running in real time on a laptop, a Raspberry Pi, or an Apple Neural Engine.
 
-## What it does
+![Dense aerial detection on the Neural Engine](assets/detection-intersection.jpg)
+<sub>yolov8m detecting ~70 vehicles and pedestrians per frame in a busy
+intersection, running on the Apple Neural Engine.</sub>
 
-- **Tracking:** one MediaPipe pose network finds faces (nose/eyes/ears) and
-  bodies (torso). **Red** cross on each person, **green** on the closest to
-  center, **blue** cross at center, with pixel-distance labels.
-- **Accurate & light:** One-Euro filtering, visibility-weighted centers,
-  threaded latest-frame capture, lite/full models — tuned to run on a Pi.
-- **Click-to-follow + detection-assisted:** click any object (a car, etc.) to
-  follow it with an OpenCV tracker. With `--detector`, a custom
-  **VisDrone-trained YOLOv8** model (run via ONNX Runtime, no PyTorch) snaps the
-  click onto the real detected box, **re-locks to fresh detections** so it can't
-  silently drift onto the background, and **reports the target LOST** when the
-  object is actually gone.
-- **Target analytics:** for a followed object — **speed** (mph), **real-world
-  size** (from a vehicle-derived scene scale), and **re-identification through
-  occlusion** (coast on velocity up to 15 s, re-lock the same object by colour +
-  predicted position when it reappears).
-- **Web panel:** multi-camera (webcam + RTSP), live video, an **Auto-best**
-  view that switches to whichever camera has the clearest subject, and a
-  **Grid** multi-view.
-- **UAV:** aim a servo camera **gimbal** at the target, or **orbit-follow** the
-  person with ArduPilot — behind conservative safety gates.
-- **Custom firmware:** a scaffolded custom ArduPilot Plane build enabling the
-  gimbal, camera, follow, and scripting features this project uses.
+## Highlights
+
+- **Custom detector** — fine-tuned **YOLOv8m on VisDrone** (aerial people +
+  vehicles, 6,471 images, 10 classes): **mAP@50 0.42** (car AP **0.81**), up
+  from 0.30 for the nano baseline.
+- **Real-time on the Apple Neural Engine** — CoreML inference at **~43 ms
+  (~23 FPS)**, **6.2× faster** than ONNX-on-CPU, with exact detection parity.
+- **Drift-proof following** — detection-assisted tracking that re-locks to fresh
+  detections instead of drifting onto the background, and reports a genuine
+  *lost* instead of silently tracking nothing.
+- **Re-identification through occlusion** — when the target is briefly hidden it
+  **coasts on its last velocity for up to 15 s** and re-locks the *same* object
+  by colour + predicted position + size + class (rejecting look-alikes).
+- **Target analytics** — live **speed (mph)** and **real-world size** (metres),
+  the latter from a scene scale inferred from known-size vehicles as rulers.
+- **Tiled inference** for dense/4K frames: **+113%** more small objects
+  recovered on a crowded 4K clip.
+- **Deploys anywhere** — one codebase runs on a laptop, a Raspberry Pi (ONNX,
+  no PyTorch), or a Mac (CoreML), with a CLI, a multi-camera web panel, and a
+  conservative **ArduPilot / MAVLink** gimbal-aim and orbit-follow integration.
+
+## Demo
+
+![Following a moving vehicle](assets/follow-car.jpg)
+<sub>Detection-assisted follow: the green box locks the moving car, the white
+line to the blue screen-centre cross is the tracking error that drives the
+gimbal / orbit command; a pedestrian is detected at the same time.</sub>
+
+## Results
+
+| Model (VisDrone, 640²) | mAP@50 | mAP@50-95 | Params | Inference |
+|---|---|---|---|---|
+| YOLOv8n (baseline) | 0.30 | 0.17 | 3.2 M | ~40 ms CPU (ONNX) |
+| **YOLOv8m** | **0.42** | **0.25** | 25.9 M | **~43 ms ANE / 264 ms CPU** |
+
+| Technique | Effect |
+|---|---|
+| CoreML → Apple Neural Engine | **6.2×** faster than ONNX-CPU (43 vs 264 ms) |
+| Tiled inference (dense 4K) | **+113%** detections (69.8 → 148.6 / frame) |
+| Validation across 6 real aerial clips | **~70,000** detections, 100% frame coverage on well-scaled footage |
+
+Training: YOLOv8m converged in **3.6 h on a free Colab T4** (also runs on a
+CPU server via a resumable systemd pipeline).
+
+## How it works
+
+```
+camera / RTSP / video ─┬─ MediaPipe pose ─────── people (face + torso crosses)
+                       └─ YOLOv8 detector ─────── vehicles + people (boxes)
+                              │  ONNX Runtime (CPU/Pi) or CoreML (Neural Engine)
+                              ▼
+                    ObjectFollower  (active → coasting → lost state machine)
+                      • CSRT tracker between detections
+                      • re-lock to fresh detections (no drift)
+                      • velocity → speed (mph)   • scene scale → size (m)
+                      • colour signature → re-identify after occlusion
+                              ▼
+                    MAVLink / ArduPilot  — gimbal aim or orbit-follow (safety-gated)
+```
+
+## Tech stack
+
+Python · OpenCV · MediaPipe · **Ultralytics YOLOv8** · **ONNX Runtime** ·
+**CoreML / coremltools** (Apple Neural Engine) · NumPy / SciPy · Flask
+(multi-camera web UI) · **pymavlink / MAVLink** (ArduPilot).
 
 ## Repo map
 
 | Path | What |
 |------|------|
-| [`tracker.py`](tracker.py) | Desktop/CLI tracker |
-| [`app.py`](app.py) | Web control panel (multi-camera, RTSP, auto-best) |
-| [`detector.py`](detector.py) | YOLOv8 object detector via ONNX Runtime (no PyTorch) |
-| [`coreml_detector.py`](coreml_detector.py) | YOLOv8 on the Apple Neural Engine (CoreML, real-time yolov8m on a Mac) |
-| [`motion.py`](motion.py), [`size.py`](size.py), [`appearance.py`](appearance.py) | Target speed (mph), real-world size, and occlusion re-identification |
-| [`filters.py`](filters.py) | One-Euro smoothing filter |
-| [`uav.py`](uav.py) | MAVLink gimbal aim + orbit-follow |
-| [`geo.py`](geo.py) | Camera line-of-sight → ground position math |
-| [`test_uav.py`](test_uav.py), [`test_flight.py`](test_flight.py), [`test_detector.py`](test_detector.py) | Tests (no hardware) |
-| [`models/`](models) | MediaPipe models + VisDrone YOLOv8 (`visdrone_n.onnx`) |
-| [`colab/`](colab) | Colab notebook to train the bigger YOLOv8m on a free GPU |
+| [`tracker.py`](tracker.py) | Desktop/CLI tracker + follower (speed, size, re-id) |
+| [`app.py`](app.py) | Multi-camera web control panel (RTSP, auto-best view) |
+| [`detector.py`](detector.py) | YOLOv8 detector via ONNX Runtime (+ tiled inference) |
+| [`coreml_detector.py`](coreml_detector.py) | YOLOv8 on the Apple Neural Engine (CoreML) |
+| [`motion.py`](motion.py) · [`size.py`](size.py) · [`appearance.py`](appearance.py) | Speed (mph), real-world size, occlusion re-identification |
+| [`uav.py`](uav.py) · [`geo.py`](geo.py) | MAVLink gimbal/orbit + camera→ground geo-projection |
+| [`colab/`](colab) | Colab notebook to train YOLOv8m on a free GPU |
 | [`ardupilot_build/`](ardupilot_build) | Custom ArduPilot firmware config |
-| [`docs/`](docs) | All project documentation |
-
-## Docs
-
-- **[docs/PARTS.md](docs/PARTS.md)** — recommended hardware to build the aircraft (nothing bought yet).
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — how the components fit and the tracking pipeline.
-- **[docs/USAGE.md](docs/USAGE.md)** — install and run everything (CLI, web, tests, SITL, build).
-- **[docs/SAFETY.md](docs/SAFETY.md)** — the UAV safety model — read before flying.
+| [`test_*.py`](.) | Hardware-free test suites (detector, speed, size, re-id, distance, UAV, flight) |
+| [`docs/`](docs) | Architecture, usage, parts, and safety documentation |
 
 ## Quick start
 
 ```bash
-pip install opencv-python==4.12.0.88 mediapipe pymavlink flask
-python3 tracker.py          # desktop tracker
-python3 app.py              # web panel at http://127.0.0.1:5000
+pip install -r requirements.txt
 
-# detection-assisted follow (drift-proof) with the bundled VisDrone model:
-pip install onnxruntime
-python3 tracker.py --detector --detect-classes car,van,truck,bus
-python3 app.py --detector   # same, in the web panel
+python3 tracker.py                              # webcam pose tracker
+python3 app.py                                  # web panel at http://127.0.0.1:5000
+
+# detection-assisted, drift-proof following (auto-uses the Neural Engine on a Mac):
+python3 tracker.py --detector --camera aerial_clip.mp4
+python3 tracker.py --detector --detect-tiles 2x2 --detect-classes car,van,truck,bus
 ```
 
-See [docs/USAGE.md](docs/USAGE.md) for camera, UAV, and web options.
+See [docs/USAGE.md](docs/USAGE.md) for cameras, UAV, tiling, and all options.
 
-## Custom detector
+## Tests
 
-The bundled [`models/visdrone_n.onnx`](models) is a YOLOv8n fine-tuned on
-VisDrone (aerial people + vehicles). To train the larger, more accurate
-**yolov8m** on a free Colab GPU (~1–2 h), open
-[`colab/train_yolov8m_visdrone.ipynb`](colab/train_yolov8m_visdrone.ipynb) — it
-exports CoreML (Mac Neural Engine) and ONNX, which drop into `--detector` the
-same way.
+```bash
+python3 test_detector.py   # detector, tiling, CoreML, re-lock logic
+python3 test_speed.py      # velocity / mph
+python3 test_size.py       # scene-scale size estimation
+python3 test_reid.py       # occlusion coasting + re-identification
+python3 test_distance.py test_uav.py test_flight.py
+```
 
-> This is a follow/filming platform: it orbits a subject at a standoff distance
-> and never flies at them. Keep a pilot in command and test in simulation first
-> — see [docs/SAFETY.md](docs/SAFETY.md).
+## Docs
+
+- [Architecture](docs/ARCHITECTURE.md) · [Usage](docs/USAGE.md) ·
+  [Parts](docs/PARTS.md) · [Safety](docs/SAFETY.md)
+
+> **Safety:** this is a follow/filming platform — it orbits a subject at a
+> standoff distance and never flies at it. All aircraft commands are gated
+> (armed + GUIDED only, geofenced, RC always overrides). Validate in simulation
+> before flight — see [docs/SAFETY.md](docs/SAFETY.md).
+
+---
+
+<sub>Detector trained on the VisDrone2019 dataset. Demo footage is royalty-free
+stock. Licensed under [MIT](LICENSE).</sub>
