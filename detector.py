@@ -138,15 +138,15 @@ class _DetectorBase:
         return Detection(float(x), float(y), float(w), float(h), float(conf),
                          cls, self.names.get(cls, str(cls)))
 
-    def best_match(self, frame, ref_box, classes=None, min_iou=0.2,
-                   max_center_dist=None):
-        """Return the detection that best matches ref_box: the highest-IoU one
-        above min_iou, or -- if none overlap -- the nearest-center detection,
-        but only if it's within max_center_dist (default 2.5x the ref-box
-        diagonal). Returns None otherwise, so a vanished object is NOT re-locked
-        onto a distant distractor of the same class (which would defeat loss
-        reporting and cause identity switches on crowded scenes)."""
-        dets = self.detect(frame, classes=classes)
+    def match_in(self, dets, ref_box, min_iou=0.2, max_center_dist=None):
+        """Best match to ref_box among an already-computed `dets` list: the
+        highest-IoU one above min_iou, or -- if none overlap -- the
+        nearest-center detection, but only if it's within max_center_dist
+        (default 2.5x the ref-box diagonal). Returns None otherwise, so a
+        vanished object is NOT re-locked onto a distant distractor of the same
+        class (which would defeat loss reporting and cause identity switches on
+        crowded scenes). Split from best_match so a caller can run one detect and
+        reuse the results (e.g. for scene-scale sizing)."""
         if not dets:
             return None
         scored = [(iou_xywh(d, ref_box), d) for d in dets]
@@ -163,6 +163,12 @@ class _DetectorBase:
         if math.hypot(ncx - rcx, ncy - rcy) <= max_center_dist:
             return nearest
         return None
+
+    def best_match(self, frame, ref_box, classes=None, min_iou=0.2,
+                   max_center_dist=None):
+        """Detect in `frame` and return the detection best matching ref_box."""
+        return self.match_in(self.detect(frame, classes=classes), ref_box,
+                             min_iou, max_center_dist)
 
     def pick_at(self, frame, cx, cy, classes=None):
         """Pick the detection to lock onto for a click at (cx, cy): a box that

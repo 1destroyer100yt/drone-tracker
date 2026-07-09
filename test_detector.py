@@ -52,7 +52,14 @@ class StubDetector:
     def pick_at(self, frame, cx, cy, classes=None):
         return self._det() if self.alive else None
 
-    def best_match(self, frame, ref_box, classes=None, min_iou=0.2):
+    def detect(self, frame, classes=None):
+        return [self._det()] if self.alive else []
+
+    def match_in(self, dets, ref_box, min_iou=0.2, max_center_dist=None):
+        return dets[0] if dets else None
+
+    def best_match(self, frame, ref_box, classes=None, min_iou=0.2,
+                   max_center_dist=None):
         return self._det() if self.alive else None
 
 

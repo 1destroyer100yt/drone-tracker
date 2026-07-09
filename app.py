@@ -26,6 +26,7 @@ import cv2
 from flask import Flask, Response, jsonify, render_template_string, request
 
 import distance
+import size
 import tracker as T
 from motion import real_speed
 
@@ -69,7 +70,7 @@ class TrackerEngine:
         self.status = {"fps": 0.0, "people": 0, "closest": None,
                        "range_m": None, "target": False, "mavlink": "off",
                        "follow": None, "score": 0.0, "target_cls": None,
-                       "speed_mph": None}
+                       "speed_mph": None, "size": None}
         self.events = deque(maxlen=40)
         self.uav = None
 
@@ -240,6 +241,7 @@ class TrackerEngine:
                 if self.follower.active else None
             obj_m = None
             obj_mph = None
+            obj_size = None
             if obj_center is not None:
                 ox, oy = obj_center
                 if self._obj_filter:
@@ -252,6 +254,16 @@ class TrackerEngine:
                         w, hfov_rad) / bw_px
                 _, obj_mph = real_speed(self.follower.speed_px, obj_m,
                                         distance.focal_px(w, hfov_rad))
+                nm = self.detector.names.get(self.follower.cls) if (
+                    self.detector is not None
+                    and self.follower.cls is not None) else None
+                if self.follower.box:
+                    dims, meas = size.object_size(
+                        nm, self.follower.box[2], self.follower.box[3],
+                        self.follower.scene_scale)
+                    if dims:
+                        obj_size = ("" if meas else "~") + size.fmt_size(
+                            dims, self.units == "imperial")
             self.has_target = obj_center is not None
 
             if obj_center is not None:
@@ -306,6 +318,8 @@ class TrackerEngine:
                     otag += f"  {obj_mph:.0f} mph"
                 elif self.follower.speed_px > 1:
                     otag += f"  {self.follower.speed_px:.0f} px/s"
+                if obj_size:
+                    otag += "  " + obj_size
                 cv2.putText(frame, otag, (bx, by - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, T.GREEN, 1, cv2.LINE_AA)
             elif self.follower.active:
@@ -333,7 +347,7 @@ class TrackerEngine:
                 closest=target_px,
                 range_m=None if target_m is None else round(target_m, 1),
                 target=self.has_target, follow=follow_status, score=score,
-                target_cls=target_cls,
+                target_cls=target_cls, size=obj_size,
                 speed_mph=None if obj_mph is None else round(obj_mph, 1))
 
         grabber.stop()
@@ -735,7 +749,7 @@ function render(){
   clr.className=(e&&e.status.target)?'on':''; clr.disabled=!(e&&e.status.target);
   document.getElementById('trackerBtn').textContent='Tracker: '+(e?e.tracker:'CSRT');
   let hs=`${engines.length} camera${engines.length!==1?'s':''}`;
-  if(e&&e.status.target)hs+=' · TARGET LOCKED'+(e.status.target_cls?' ('+e.status.target_cls+')':'')+(e.status.speed_mph!=null?' · '+e.status.speed_mph+' mph':'');
+  if(e&&e.status.target)hs+=' · TARGET LOCKED'+(e.status.target_cls?' ('+e.status.target_cls+')':'')+(e.status.speed_mph!=null?' · '+e.status.speed_mph+' mph':'')+(e.status.size?' · '+e.status.size:'');
   if(e&&e.status.follow)hs+=' · follow: '+e.status.follow;
   document.getElementById('hstatus').textContent=hs;
   document.getElementById('log').textContent=e?e.events.join('\n'):'';

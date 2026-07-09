@@ -52,6 +52,7 @@ import mediapipe as mp
 from mediapipe.tasks.python import BaseOptions, vision
 
 import distance
+import size
 from filters import OneEuroFilter, PointSmoother
 from motion import VelocityTracker, real_speed
 
@@ -198,6 +199,8 @@ class ObjectFollower:
         self.score = None          # last detection confidence
         self.vel = None            # VelocityTracker (created on start)
         self.speed_px = 0.0        # smoothed target speed, pixels/second
+        self.scene_scale = None    # metres-per-pixel, inferred from vehicles
+        self.last_dets = []        # last full-scene detections (for size/re-id)
 
     @property
     def active(self):
@@ -269,18 +272,26 @@ class ObjectFollower:
         self.det_misses = 0
         self.vel = VelocityTracker()
         self.speed_px = 0.0
+        self.scene_scale = None
+        self.last_dets = []
         return True
 
     def _redetect(self, frame):
         """Try to re-lock onto a fresh detection of the tracked object.
         Returns the (cx, cy) centre on success, or None. On repeated failure it
-        declares the target lost and clears."""
+        declares the target lost and clears. One full-scene detect here also
+        feeds the scene scale (size) and the detection cache (re-id)."""
         try:
-            match = self.detector.best_match(
-                frame, self.box, classes=self._cls_filter(),
-                min_iou=self.match_iou)
+            dets = self.detector.detect(frame)
         except Exception:
-            match = None
+            dets = []
+        self.last_dets = dets
+        sc = size.estimate_scene_scale(dets)
+        if sc:
+            self.scene_scale = sc
+        cf = self._cls_filter()
+        cand = dets if cf is None else [d for d in dets if d.cls in cf]
+        match = self.detector.match_in(cand, self.box, min_iou=self.match_iou)
         if match is not None:
             if self._init_tracker(frame, (match.x, match.y, match.w, match.h)):
                 self.lost = 0
@@ -344,6 +355,8 @@ class ObjectFollower:
         self.score = None
         self.vel = None
         self.speed_px = 0.0
+        self.scene_scale = None
+        self.last_dets = []
 
 
 class FrameGrabber:
@@ -655,6 +668,7 @@ def main():
             obj_center = follower.update(frame, t) if follower.active else None
             obj_m = None
             obj_mph = None
+            obj_size = None
             if obj_center is not None:
                 ox, oy = obj_center
                 if obj_filter:
@@ -665,6 +679,14 @@ def main():
                     obj_m = args.target_width * distance.focal_px(w, hfov_rad) / bw_px
                 _, obj_mph = real_speed(follower.speed_px, obj_m,
                                         distance.focal_px(w, hfov_rad))
+                nm = detector.names.get(follower.cls) if (
+                    detector is not None and follower.cls is not None) else None
+                if follower.box:
+                    dims, measured = size.object_size(
+                        nm, follower.box[2], follower.box[3],
+                        follower.scene_scale)
+                    if dims:
+                        obj_size = (dims, measured)
 
             # unified target: clicked object if present, else the closest person
             if obj_center is not None:
@@ -719,6 +741,10 @@ def main():
                         otag += f"  {obj_mph:.0f} mph"
                     elif follower.speed_px > 1:
                         otag += f"  {follower.speed_px:.0f} px/s"
+                    if obj_size is not None:
+                        dims, measured = obj_size
+                        otag += f"  {'' if measured else '~'}" \
+                                f"{size.fmt_size(dims, imperial)}"
                     cv2.putText(frame, otag, (bx, by - 6),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 1, cv2.LINE_AA)
                 elif follower.active:   # temporarily lost, show a hint
