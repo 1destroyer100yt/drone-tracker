@@ -33,6 +33,7 @@ Raspberry Pi, with a CLI, a web control panel, and an ArduPilot integration.
 | [`tracker.py`](tracker.py) | Desktop/CLI tracker |
 | [`app.py`](app.py) | Web control panel (multi-camera, RTSP, auto-best) |
 | [`detector.py`](detector.py) | YOLOv8 object detector via ONNX Runtime (no PyTorch) |
+| [`coreml_detector.py`](coreml_detector.py) | YOLOv8 on the Apple Neural Engine (CoreML, real-time yolov8m on a Mac) |
 | [`uav.py`](uav.py) | MAVLink gimbal aim + orbit-follow |
 | [`geo.py`](geo.py) | Camera line-of-sight → ground position math |
 | [`test_uav.py`](test_uav.py), [`test_flight.py`](test_flight.py), [`test_detector.py`](test_detector.py) | Tests (no hardware) |

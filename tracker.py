@@ -561,11 +561,11 @@ def main():
     detector = None
     target_classes = None
     if args.detector:
-        from detector import YoloOnnxDetector, default_model_path
+        from detector import build_detector, default_model_path
         model_path = default_model_path(MODEL_DIR) if args.detector == "auto" \
             else args.detector
         print(f"Detector: loading {model_path} ...")
-        detector = YoloOnnxDetector(model_path, conf=args.detect_conf)
+        detector = build_detector(model_path, conf=args.detect_conf)
         if args.detect_classes:
             ids = []
             for tok in args.detect_classes.split(","):

@@ -91,9 +91,15 @@ tricycle, awning-tricycle, bus, motor). Install the optional dep with
 nano's 0.30) but heavier — roughly **290 ms per detection on an M2 CPU** vs
 **~40 ms** for yolov8n. The detector only runs every `--detect-interval` frames
 (CSRT fills the gaps), so on CPU raise the interval for yolov8m
-(e.g. `--detect-interval 30`) to stay smooth, or use the nano. For true
-real-time with yolov8m, run it on the Mac Neural Engine via CoreML
-(`models/visdrone_m.mlpackage`).
+(e.g. `--detect-interval 30`) to stay smooth, or use the nano.
+
+**Apple Neural Engine (real-time yolov8m on a Mac):** pass the CoreML package to
+run on the Neural Engine — `--detector models/visdrone_m.mlpackage` — which is
+**~43 ms/detect (~23/s), 6× faster** than ONNX-CPU (measured on an M2), i.e.
+real-time. On a Mac the bare `--detector` flag picks this automatically when the
+`.mlpackage` is present. Install the dep with `pip install coremltools pillow`
+(CoreML is macOS-only; on a Pi/Linux use the ONNX models). Parity with the ONNX
+model is exact (matching boxes at IoU ≥ 0.7).
 
 **Distance:** estimated from shoulder width via the pinhole model; tune with
 `--shoulder-width 0.40` (metres) if your subjects differ. It's a ±15-20%

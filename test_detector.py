@@ -200,6 +200,41 @@ def test_best_match_distance_gate():
     print("best_match distance gate: OK  (rejects distant distractor)")
 
 
+COREML = os.path.join(os.path.dirname(__file__), "models", "visdrone_m.mlpackage")
+
+
+def test_build_detector_dispatch():
+    """build_detector picks the backend by extension."""
+    from detector import build_detector, YoloOnnxDetector
+    if os.path.exists(MODEL):
+        assert isinstance(build_detector(MODEL), YoloOnnxDetector)
+    print("build_detector dispatch: OK")
+
+
+def test_coreml_backend():
+    """CoreML detector loads, shares the base interface, and runs (macOS +
+    coremltools + the .mlpackage required; skipped otherwise)."""
+    try:
+        import coremltools  # noqa: F401
+    except Exception:
+        print("coreml backend: SKIP (coremltools not installed)")
+        return
+    if not os.path.exists(COREML):
+        print("coreml backend: SKIP (models/visdrone_m.mlpackage not present)")
+        return
+    from detector import build_detector
+    from coreml_detector import CoreMLDetector
+    d = build_detector(COREML)
+    assert isinstance(d, CoreMLDetector)
+    assert len(d.names) == 10 and d.class_id("car") == 3
+    # runs without crashing; black frame -> a list (usually empty)
+    out = d.detect(np.zeros((480, 640, 3), np.uint8))
+    assert isinstance(out, list)
+    # shares the selection logic from the base
+    assert hasattr(d, "best_match") and hasattr(d, "pick_at")
+    print(f"coreml backend: OK  (ANE, {len(d.names)} classes)")
+
+
 def main():
     test_geometry()
     test_snap_on_start()
@@ -208,6 +243,8 @@ def main():
     test_nms_format_output()
     test_default_model_path()
     test_best_match_distance_gate()
+    test_build_detector_dispatch()
+    test_coreml_backend()
     print("\nall detector tests passed.")
 
 

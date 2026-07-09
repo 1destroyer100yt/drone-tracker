@@ -1,18 +1,19 @@
-"""Lightweight YOLOv8 object detector via ONNX Runtime (no PyTorch).
+"""Lightweight YOLOv8 object detectors for the follower.
 
-Runs a YOLOv8 detect model exported to ONNX (e.g. our VisDrone-trained
-`models/visdrone_n.onnx`) with just onnxruntime + numpy + OpenCV. This keeps the
-follower deployable on a laptop or a Raspberry Pi without dragging in torch.
+Two backends with an identical interface (see ObjectFollower in tracker.py):
+  - `YoloOnnxDetector` -- ONNX Runtime, no PyTorch: runs anywhere (laptop, Pi).
+  - `CoreMLDetector`   -- Apple Neural Engine via CoreML (macOS only, much
+    faster for the bigger yolov8m); lives in `coreml_detector.py`.
 
-The follower uses it two ways (see ObjectFollower in tracker.py):
-  - seed a click/box onto the *actual* detected object box (tighter than a
-    fixed square), and
-  - periodically re-lock the CSRT tracker to a fresh detection so it can't
-    silently drift onto the background, and report a genuine loss when the
-    object truly isn't detected any more (confidence-gated loss reporting).
+Use `build_detector(path)` to get the right one by file extension, or
+`default_model_path(models_dir)` + `build_detector` for the auto default.
 
-onnxruntime is an optional dependency; importing this module without it raises a
-clear error only when you actually try to build a detector.
+The follower uses a detector two ways: seed a click/box onto the *actual*
+detected object box, and periodically re-lock the tracker to a fresh detection
+so it can't silently drift -- reporting a genuine loss when the object is gone.
+
+onnxruntime / coremltools are optional deps; the error is raised only when you
+actually build that backend.
 """
 
 import json
@@ -44,19 +45,125 @@ def box_center(box):
     return (x + w / 2.0, y + h / 2.0)
 
 
+def _coreml_available():
+    try:
+        import coremltools  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def default_model_path(models_dir):
-    """Best bundled detector available: prefer the bigger, more accurate
-    yolov8m, else the yolov8n that ships in the repo. Used when --detector is
-    given with no explicit path."""
-    for name in ("visdrone_m.onnx", "visdrone_n.onnx"):
+    """Best bundled detector available, in preference order. On a Mac with
+    coremltools we prefer the yolov8m CoreML package (Neural Engine, real-time);
+    otherwise the yolov8m ONNX if present, else the in-repo yolov8n. Used when
+    --detector is given with no explicit path."""
+    import platform
+    names = []
+    if platform.system() == "Darwin" and _coreml_available():
+        names.append("visdrone_m.mlpackage")
+    names += ["visdrone_m.onnx", "visdrone_n.onnx"]
+    for name in names:
         p = os.path.join(models_dir, name)
         if os.path.exists(p):
             return p
     return os.path.join(models_dir, "visdrone_n.onnx")
 
 
-class YoloOnnxDetector:
-    """A YOLOv8 detect model running on ONNX Runtime.
+def build_detector(path, conf=0.25, iou=0.45):
+    """Construct the right detector backend for a model path by extension:
+    .mlpackage/.mlmodel -> CoreML (ANE), anything else -> ONNX Runtime."""
+    if path.endswith((".mlpackage", ".mlmodel")):
+        from coreml_detector import CoreMLDetector
+        return CoreMLDetector(path, conf=conf, iou=iou)
+    return YoloOnnxDetector(path, conf=conf, iou=iou)
+
+
+class _DetectorBase:
+    """Shared geometry + selection logic on top of a subclass `detect()`.
+
+    Subclasses set: self.conf, self.iou, self.in_w, self.in_h, self.names, and
+    implement detect(frame, classes) -> list[Detection]."""
+
+    @staticmethod
+    def _load_names(names_path, model_path):
+        """Class-id -> name map, from an explicit json or a sibling
+        visdrone_classes.json next to the model."""
+        if names_path is None:
+            guess = os.path.join(os.path.dirname(model_path),
+                                 "visdrone_classes.json")
+            names_path = guess if os.path.exists(guess) else None
+        if names_path and os.path.exists(names_path):
+            raw = json.load(open(names_path))
+            return {int(k): v for k, v in raw.items()}
+        return {}
+
+    def class_id(self, name):
+        """Look up a class id by (case-insensitive) name, or None."""
+        for cid, cname in self.names.items():
+            if cname.lower() == str(name).lower():
+                return cid
+        return None
+
+    def _letterbox(self, frame):
+        """Resize keeping aspect ratio and pad to the network size. Returns the
+        padded BGR canvas plus (scale, pad_x, pad_y) to map boxes back."""
+        h0, w0 = frame.shape[:2]
+        r = min(self.in_w / w0, self.in_h / h0)
+        nw, nh = round(w0 * r), round(h0 * r)
+        resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
+        canvas = np.full((self.in_h, self.in_w, 3), 114, np.uint8)
+        px, py = (self.in_w - nw) // 2, (self.in_h - nh) // 2
+        canvas[py:py + nh, px:px + nw] = resized
+        return canvas, r, px, py
+
+    def _mk(self, x, y, w, h, conf, cls):
+        cls = int(cls)
+        return Detection(float(x), float(y), float(w), float(h), float(conf),
+                         cls, self.names.get(cls, str(cls)))
+
+    def best_match(self, frame, ref_box, classes=None, min_iou=0.2,
+                   max_center_dist=None):
+        """Return the detection that best matches ref_box: the highest-IoU one
+        above min_iou, or -- if none overlap -- the nearest-center detection,
+        but only if it's within max_center_dist (default 2.5x the ref-box
+        diagonal). Returns None otherwise, so a vanished object is NOT re-locked
+        onto a distant distractor of the same class (which would defeat loss
+        reporting and cause identity switches on crowded scenes)."""
+        dets = self.detect(frame, classes=classes)
+        if not dets:
+            return None
+        scored = [(iou_xywh(d, ref_box), d) for d in dets]
+        best_iou, best = max(scored, key=lambda s: s[0])
+        if best_iou >= min_iou:
+            return best
+        rcx, rcy = box_center(ref_box)
+        nearest = min(dets, key=lambda d: (box_center(d)[0] - rcx) ** 2
+                      + (box_center(d)[1] - rcy) ** 2)
+        if max_center_dist is None:
+            diag = math.hypot(ref_box[2], ref_box[3])
+            max_center_dist = 2.5 * max(diag, 1.0)
+        ncx, ncy = box_center(nearest)
+        if math.hypot(ncx - rcx, ncy - rcy) <= max_center_dist:
+            return nearest
+        return None
+
+    def pick_at(self, frame, cx, cy, classes=None):
+        """Pick the detection to lock onto for a click at (cx, cy): a box that
+        contains the point (smallest such box), else the nearest-center one."""
+        dets = self.detect(frame, classes=classes)
+        if not dets:
+            return None
+        inside = [d for d in dets
+                  if d.x <= cx <= d.x + d.w and d.y <= cy <= d.y + d.h]
+        if inside:
+            return min(inside, key=lambda d: d.w * d.h)
+        return min(dets, key=lambda d: (box_center(d)[0] - cx) ** 2
+                   + (box_center(d)[1] - cy) ** 2)
+
+
+class YoloOnnxDetector(_DetectorBase):
+    """A YOLOv8 detect model running on ONNX Runtime (CPU by default).
 
     detect(frame) -> list[Detection] in the frame's own pixel coordinates.
     """
@@ -82,59 +189,17 @@ class YoloOnnxDetector:
         _, _, h, w = inp.shape
         self.in_h = int(h) if isinstance(h, int) else 640
         self.in_w = int(w) if isinstance(w, int) else 640
-
         self.names = self._load_names(names_path, onnx_path)
 
-    @staticmethod
-    def _load_names(names_path, onnx_path):
-        if names_path is None:
-            guess = os.path.join(os.path.dirname(onnx_path),
-                                 "visdrone_classes.json")
-            names_path = guess if os.path.exists(guess) else None
-        if names_path and os.path.exists(names_path):
-            raw = json.load(open(names_path))
-            return {int(k): v for k, v in raw.items()}
-        return {}
-
-    def class_id(self, name):
-        """Look up a class id by (case-insensitive) name, or None."""
-        for cid, cname in self.names.items():
-            if cname.lower() == str(name).lower():
-                return cid
-        return None
-
-    def _letterbox(self, frame):
-        """Resize keeping aspect ratio, pad to the network size. Returns the
-        tensor plus (scale, pad_x, pad_y) to map boxes back to the original."""
-        h0, w0 = frame.shape[:2]
-        r = min(self.in_w / w0, self.in_h / h0)
-        nw, nh = round(w0 * r), round(h0 * r)
-        resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
-        canvas = np.full((self.in_h, self.in_w, 3), 114, np.uint8)
-        px, py = (self.in_w - nw) // 2, (self.in_h - nh) // 2
-        canvas[py:py + nh, px:px + nw] = resized
-        rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
-        tensor = rgb.astype(np.float32) / 255.0
-        tensor = tensor.transpose(2, 0, 1)[None]        # 1,3,H,W
-        return np.ascontiguousarray(tensor), r, px, py
-
-    def _mk(self, x, y, w, h, conf, cls):
-        cls = int(cls)
-        return Detection(float(x), float(y), float(w), float(h), float(conf),
-                         cls, self.names.get(cls, str(cls)))
-
     def detect(self, frame, classes=None):
-        """Detect objects in a BGR frame.
-
-        Handles both YOLOv8 ONNX output layouts:
-          - raw head (exported nms=False): [1, 4+nc, 8400] -> we decode + NMS
-          - end-to-end (exported nms=True): [1, N, 6] = x1,y1,x2,y2,conf,cls,
-            already NMS'd, so we just filter and rescale.
-
-        classes: optional iterable of class ids to keep (others dropped).
-        Returns a list of Detection, highest confidence first.
-        """
-        tensor, r, px, py = self._letterbox(frame)
+        """Detect objects in a BGR frame. Handles both ONNX output layouts:
+          - raw head (nms=False): [1, 4+nc, 8400] -> we decode + NMS
+          - end-to-end (nms=True): [1, N, 6] = x1,y1,x2,y2,conf,cls (pre-NMS'd).
+        classes: optional iterable of class ids to keep. Highest conf first."""
+        canvas, r, px, py = self._letterbox(frame)
+        rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+        tensor = np.ascontiguousarray(
+            rgb.astype(np.float32).transpose(2, 0, 1)[None] / 255.0)
         out = self.session.run(None, {self.input_name: tensor})[0]
         arr = np.squeeze(out, 0)
         classes = set(int(c) for c in classes) if classes is not None else None
@@ -192,44 +257,3 @@ class YoloOnnxDetector:
                 for i in idx]
         dets.sort(key=lambda d: d.conf, reverse=True)
         return dets
-
-    def best_match(self, frame, ref_box, classes=None, min_iou=0.2,
-                   max_center_dist=None):
-        """Return the detection that best matches ref_box: the highest-IoU one
-        above min_iou, or -- if none overlap -- the nearest-center detection,
-        but only if it's within max_center_dist (default 2.5x the ref-box
-        diagonal). Returns None otherwise, so a vanished object is NOT re-locked
-        onto a distant distractor of the same class (which would defeat loss
-        reporting and cause identity switches on crowded scenes)."""
-        dets = self.detect(frame, classes=classes)
-        if not dets:
-            return None
-        scored = [(iou_xywh(d, ref_box), d) for d in dets]
-        best_iou, best = max(scored, key=lambda s: s[0])
-        if best_iou >= min_iou:
-            return best
-        # nothing overlaps: the nearest-center detection can recover a
-        # fast-moving object, but only if it's plausibly close.
-        rcx, rcy = box_center(ref_box)
-        nearest = min(dets, key=lambda d: (box_center(d)[0] - rcx) ** 2
-                      + (box_center(d)[1] - rcy) ** 2)
-        if max_center_dist is None:
-            diag = math.hypot(ref_box[2], ref_box[3])
-            max_center_dist = 2.5 * max(diag, 1.0)
-        ncx, ncy = box_center(nearest)
-        if math.hypot(ncx - rcx, ncy - rcy) <= max_center_dist:
-            return nearest
-        return None
-
-    def pick_at(self, frame, cx, cy, classes=None):
-        """Pick the detection to lock onto for a click at (cx, cy): a box that
-        contains the point (smallest such box), else the nearest-center one."""
-        dets = self.detect(frame, classes=classes)
-        if not dets:
-            return None
-        inside = [d for d in dets
-                  if d.x <= cx <= d.x + d.w and d.y <= cy <= d.y + d.h]
-        if inside:
-            return min(inside, key=lambda d: d.w * d.h)
-        return min(dets, key=lambda d: (box_center(d)[0] - cx) ** 2
-                   + (box_center(d)[1] - cy) ** 2)

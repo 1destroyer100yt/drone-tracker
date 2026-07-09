@@ -864,10 +864,10 @@ def main():
     args = ap.parse_args()
 
     if args.detector:
-        from detector import YoloOnnxDetector, default_model_path
+        from detector import build_detector, default_model_path
         model_path = default_model_path(T.MODEL_DIR) if args.detector == "auto" \
             else args.detector
-        det = YoloOnnxDetector(model_path, conf=args.detect_conf)
+        det = build_detector(model_path, conf=args.detect_conf)
         classes = None
         if args.detect_classes:
             ids = []
