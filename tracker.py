@@ -51,6 +51,7 @@ import cv2
 import mediapipe as mp
 from mediapipe.tasks.python import BaseOptions, vision
 
+import appearance
 import distance
 import size
 from filters import OneEuroFilter, PointSmoother
@@ -181,7 +182,7 @@ class ObjectFollower:
 
     def __init__(self, box_size=80, max_lost=20, algo="CSRT", detector=None,
                  detect_interval=15, match_iou=0.2, target_classes=None,
-                 max_detect_misses=3):
+                 max_detect_misses=3, coast_seconds=15.0, reid_min_sim=0.45):
         self.box_size = box_size
         self.max_lost = max_lost
         self.algo = algo
@@ -190,8 +191,12 @@ class ObjectFollower:
         self.match_iou = match_iou
         self.target_classes = target_classes    # allowed class ids, or None
         self.max_detect_misses = max_detect_misses
+        self.coast_seconds = coast_seconds       # occlusion re-id window
+        self.reid_min_sim = reid_min_sim         # min colour similarity to re-id
+        self.state = None          # None (dead) | "active" | "coasting"
         self.tracker = None
         self.box = None            # (x, y, w, h) ints
+        self.center = None
         self.lost = 0
         self.frame_i = 0
         self.det_misses = 0
@@ -201,10 +206,31 @@ class ObjectFollower:
         self.speed_px = 0.0        # smoothed target speed, pixels/second
         self.scene_scale = None    # metres-per-pixel, inferred from vehicles
         self.last_dets = []        # last full-scene detections (for size/re-id)
+        self.sig_hist = None       # appearance signature (HS colour histogram)
+        self.coast_start = self.coast_last_t = 0.0
+        self.coast_pred = None     # predicted (x, y) while occluded
+        self.coast_vx = self.coast_vy = 0.0
+        self.coast_size = None
 
     @property
     def active(self):
-        return self.tracker is not None
+        """True only with a confident lock (drives the gimbal / green box)."""
+        return self.state == "active"
+
+    @property
+    def alive(self):
+        """True while a track exists -- locked OR coasting through occlusion."""
+        return self.state is not None
+
+    @property
+    def coasting(self):
+        return self.state == "coasting"
+
+    @property
+    def coast_elapsed(self):
+        if self.state != "coasting":
+            return 0.0
+        return max(0.0, self.coast_last_t - self.coast_start)
 
     def _new_tracker(self):
         if self.algo == "KCF" and hasattr(cv2, "TrackerKCF_create"):
@@ -267,6 +293,7 @@ class ObjectFollower:
             box = (cx - s / 2, cy - s / 2, s, s)
         if not self._init_tracker(frame, box):
             return False
+        self.state = "active"
         self.lost = 0
         self.frame_i = 0
         self.det_misses = 0
@@ -274,13 +301,19 @@ class ObjectFollower:
         self.speed_px = 0.0
         self.scene_scale = None
         self.last_dets = []
+        x, y, bw, bh = self.box
+        self.center = (x + bw / 2.0, y + bh / 2.0)
+        self.sig_hist = None
+        self.coast_pred = None
+        self._update_signature(frame)
         return True
 
-    def _redetect(self, frame):
+    def _redetect(self, frame, t):
         """Try to re-lock onto a fresh detection of the tracked object.
         Returns the (cx, cy) centre on success, or None. On repeated failure it
-        declares the target lost and clears. One full-scene detect here also
-        feeds the scene scale (size) and the detection cache (re-id)."""
+        enters COASTING (occlusion re-id) if a signature exists, else clears.
+        One full-scene detect here also feeds the scene scale (size) and the
+        detection cache (re-id)."""
         try:
             dets = self.detector.detect(frame)
         except Exception:
@@ -301,7 +334,10 @@ class ObjectFollower:
                 return (x + bw / 2.0, y + bh / 2.0)
         self.det_misses += 1
         if self.det_misses >= self.max_detect_misses:
-            self.clear()
+            if self.detector is not None and self.sig_hist is not None:
+                self._enter_coasting(t)        # occluded -> coast & re-identify
+            else:
+                self.clear()
         return None
 
     def _track_velocity(self, center, t):
@@ -311,12 +347,110 @@ class ObjectFollower:
             t = time.monotonic()
         self.speed_px = self.vel.update(t, center[0], center[1])
 
-    def update(self, frame, t=None):
-        """Return the (cx, cy) centre of the tracked box, or None if lost.
-        Pass `t` (seconds) for correct speed on recorded/variable-rate video;
-        omit it and wall-clock time is used (correct for a live camera)."""
-        if self.tracker is None:
+    def _update_signature(self, frame):
+        """Refresh the appearance (colour-histogram) signature while locked, as
+        a running average so it adapts to gradual lighting/pose change."""
+        if self.box is None:
+            return
+        h = appearance.box_histogram(frame, self.box)
+        if h is None:
+            return
+        self.sig_hist = h if self.sig_hist is None else 0.7 * self.sig_hist \
+            + 0.3 * h
+
+    def _enter_coasting(self, t):
+        """Target occluded: stop CSRT and coast on the last velocity, trying to
+        re-identify it when it reappears (up to coast_seconds)."""
+        self.tracker = None
+        self.state = "coasting"
+        self.coast_start = self.coast_last_t = t
+        self.coast_pred = self.center
+        self.coast_vx = self.vel.vx if self.vel else 0.0
+        self.coast_vy = self.vel.vy if self.vel else 0.0
+        self.coast_size = (self.box[2], self.box[3]) if self.box else None
+        self.speed_px = 0.0
+
+    def _reid_match(self, frame, dets, elapsed):
+        """Pick the detection that best re-identifies the coasting target:
+        same class, inside the predicted search region (which grows with speed x
+        elapsed), colour-similar above threshold, similar size. None if no
+        confident candidate -- so we don't grab the wrong car."""
+        if self.coast_pred is None:
             return None
+        cf = self._cls_filter()
+        cands = [d for d in dets if (cf is None or d.cls in cf)]
+        if not cands:
+            return None
+        px, py = self.coast_pred
+        speed = math.hypot(self.coast_vx, self.coast_vy)
+        base = 2.0 * math.hypot(*(self.coast_size or (self.box_size,
+                                                      self.box_size)))
+        radius = base + speed * elapsed
+        best, best_score = None, -1.0
+        for d in cands:
+            dist = math.hypot(d.x + d.w / 2.0 - px, d.y + d.h / 2.0 - py)
+            if dist > radius:
+                continue
+            sim = appearance.similarity(
+                self.sig_hist,
+                appearance.box_histogram(frame, (d.x, d.y, d.w, d.h)))
+            if sim < self.reid_min_sim:
+                continue
+            size_sim = 1.0
+            if self.coast_size:
+                a, b = d.w * d.h, self.coast_size[0] * self.coast_size[1]
+                size_sim = min(a, b) / max(a, b) if max(a, b) > 0 else 0.0
+            score = 0.5 * sim + 0.3 * (1.0 - dist / radius) + 0.2 * size_sim
+            if score > best_score:
+                best, best_score = d, score
+        return best
+
+    def _update_coasting(self, frame, t):
+        elapsed = t - self.coast_start
+        if elapsed > self.coast_seconds:
+            self.clear()                       # gone too long -> truly LOST
+            return None
+        dt = max(0.0, t - self.coast_last_t)
+        self.coast_last_t = t
+        if self.coast_pred is not None:        # dead-reckon the hidden object
+            self.coast_pred = (self.coast_pred[0] + self.coast_vx * dt,
+                               self.coast_pred[1] + self.coast_vy * dt)
+        self.frame_i += 1
+        if self.frame_i % self.detect_interval == 0:
+            try:
+                dets = self.detector.detect(frame)
+            except Exception:
+                dets = []
+            self.last_dets = dets
+            sc = size.estimate_scene_scale(dets)
+            if sc:
+                self.scene_scale = sc
+            cand = self._reid_match(frame, dets, elapsed)
+            if cand is not None and self._init_tracker(
+                    frame, (cand.x, cand.y, cand.w, cand.h)):
+                self.state = "active"          # re-acquired the same object
+                self.cls = cand.cls
+                self.score = cand.conf
+                self.lost = self.det_misses = 0
+                x, y, bw, bh = self.box
+                self.center = (x + bw / 2.0, y + bh / 2.0)
+                self._update_signature(frame)
+                self._track_velocity(self.center, t)
+                return self.center
+        return None
+
+    def update(self, frame, t=None):
+        """Return the (cx, cy) centre while locked, or None while coasting/lost.
+        Pass `t` (seconds) for correct speed/coast timing on recorded video;
+        omit it and wall-clock time is used (correct for a live camera). Call it
+        whenever `alive`; read `active` to know if the return is a real lock."""
+        if self.state is None:
+            return None
+        if t is None:
+            t = time.monotonic()
+        if self.state == "coasting":
+            return self._update_coasting(frame, t)
+
         ok, box = self.tracker.update(frame)
         center = None
         if ok:
@@ -331,23 +465,26 @@ class ObjectFollower:
             self.frame_i += 1
             # re-lock on a schedule, or immediately if CSRT lost the object
             if not ok or self.frame_i % self.detect_interval == 0:
-                relock = self._redetect(frame)
+                relock = self._redetect(frame, t)
                 if relock is not None:
                     center = relock
-                elif self.tracker is None:    # _redetect declared it lost
-                    self.speed_px = 0.0
+                elif self.state != "active":  # entered coasting or cleared
                     return None
-                # else: no match this cycle -> center stays (None between fixes)
         elif not ok and self.lost > self.max_lost:
             self.clear()                       # no detector: brief-occlusion only
             return None
 
-        self._track_velocity(center, t)
+        if center is not None:
+            self._track_velocity(center, t)
+            self._update_signature(frame)
+            self.center = center
         return center
 
     def clear(self):
+        self.state = None
         self.tracker = None
         self.box = None
+        self.center = None
         self.lost = 0
         self.frame_i = 0
         self.det_misses = 0
@@ -357,6 +494,8 @@ class ObjectFollower:
         self.speed_px = 0.0
         self.scene_scale = None
         self.last_dets = []
+        self.sig_hist = None
+        self.coast_pred = None
 
 
 class FrameGrabber:
@@ -483,6 +622,10 @@ def parse_args():
                     help="run detection on an overlapping CxR tile grid (e.g. "
                          "2x3) to recover small objects in high-res/4K frames; "
                          "slower (~tiles+1 inferences per frame)")
+    ap.add_argument("--coast-seconds", type=float, default=15.0,
+                    help="occlusion re-id: if the target is briefly hidden, keep "
+                         "coasting on its last velocity this long and re-lock it "
+                         "by colour + predicted position (default 15)")
     # advanced flight: orbit-follow the target (opt-in, needs --mavlink)
     ap.add_argument("--follow", action="store_true",
                     help="ADVANCED: command the plane to ORBIT the tracked "
@@ -565,7 +708,8 @@ def main():
     assigner = TrackAssigner()
     follower = ObjectFollower(algo=args.tracker, detector=detector,
                               detect_interval=args.detect_interval,
-                              target_classes=target_classes)
+                              target_classes=target_classes,
+                              coast_seconds=args.coast_seconds)
     obj_filter = None            # One-Euro pair for the object center
     hfov_rad = math.radians(args.hfov)
     imperial = args.units == "imperial"
@@ -665,7 +809,7 @@ def main():
                 follower.start(frame, click[0], click[1])
                 obj_filter = (OneEuroFilter(), OneEuroFilter())
 
-            obj_center = follower.update(frame, t) if follower.active else None
+            obj_center = follower.update(frame, t) if follower.alive else None
             obj_m = None
             obj_mph = None
             obj_size = None
@@ -747,7 +891,12 @@ def main():
                                 f"{size.fmt_size(dims, imperial)}"
                     cv2.putText(frame, otag, (bx, by - 6),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 1, cv2.LINE_AA)
-                elif follower.active:   # temporarily lost, show a hint
+                elif follower.coasting:  # occluded: coasting + re-identifying
+                    cv2.putText(frame,
+                                f"COASTING {follower.coast_elapsed:.0f}s (re-id)",
+                                (8, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                (0, 200, 255), 1, cv2.LINE_AA)
+                elif follower.active:   # locked but between fixes, show a hint
                     cv2.putText(frame, "target lost...", (8, 62),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, RED, 1, cv2.LINE_AA)
 

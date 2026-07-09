@@ -60,7 +60,7 @@ class TrackerEngine:
         # background (confidence-gated loss reporting).
         self.follower = T.ObjectFollower(
             detector=detector, target_classes=target_classes,
-            detect_interval=detect_interval)
+            detect_interval=detect_interval, coast_seconds=15.0)
         self._obj_filter = None
         self._pending_click = None   # (nx, ny) normalized, set by the web layer
         self._clear_target = False
@@ -70,7 +70,7 @@ class TrackerEngine:
         self.status = {"fps": 0.0, "people": 0, "closest": None,
                        "range_m": None, "target": False, "mavlink": "off",
                        "follow": None, "score": 0.0, "target_cls": None,
-                       "speed_mph": None, "size": None}
+                       "speed_mph": None, "size": None, "coasting": None}
         self.events = deque(maxlen=40)
         self.uav = None
 
@@ -238,7 +238,7 @@ class TrackerEngine:
                 self._obj_filter = (T.OneEuroFilter(), T.OneEuroFilter())
                 self.log(f"target set at ({nx:.2f},{ny:.2f})")
             obj_center = self.follower.update(frame, t) \
-                if self.follower.active else None
+                if self.follower.alive else None
             obj_m = None
             obj_mph = None
             obj_size = None
@@ -322,6 +322,11 @@ class TrackerEngine:
                     otag += "  " + obj_size
                 cv2.putText(frame, otag, (bx, by - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, T.GREEN, 1, cv2.LINE_AA)
+            elif self.follower.coasting:
+                cv2.putText(frame,
+                            f"COASTING {self.follower.coast_elapsed:.0f}s (re-id)",
+                            (8, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (0, 200, 255), 1, cv2.LINE_AA)
             elif self.follower.active:
                 cv2.putText(frame, "target lost...", (8, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, T.RED, 1, cv2.LINE_AA)
@@ -348,7 +353,9 @@ class TrackerEngine:
                 range_m=None if target_m is None else round(target_m, 1),
                 target=self.has_target, follow=follow_status, score=score,
                 target_cls=target_cls, size=obj_size,
-                speed_mph=None if obj_mph is None else round(obj_mph, 1))
+                speed_mph=None if obj_mph is None else round(obj_mph, 1),
+                coasting=round(self.follower.coast_elapsed, 1)
+                if self.follower.coasting else None)
 
         grabber.stop()
         if landmarker:
@@ -750,6 +757,7 @@ function render(){
   document.getElementById('trackerBtn').textContent='Tracker: '+(e?e.tracker:'CSRT');
   let hs=`${engines.length} camera${engines.length!==1?'s':''}`;
   if(e&&e.status.target)hs+=' · TARGET LOCKED'+(e.status.target_cls?' ('+e.status.target_cls+')':'')+(e.status.speed_mph!=null?' · '+e.status.speed_mph+' mph':'')+(e.status.size?' · '+e.status.size:'');
+  if(e&&e.status.coasting!=null)hs+=' · COASTING '+e.status.coasting+'s (re-id)';
   if(e&&e.status.follow)hs+=' · follow: '+e.status.follow;
   document.getElementById('hstatus').textContent=hs;
   document.getElementById('log').textContent=e?e.events.join('\n'):'';
