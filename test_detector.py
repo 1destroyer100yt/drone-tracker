@@ -163,12 +163,51 @@ def test_nms_format_output():
     print("nms-format output: OK  (end2end [N,6] decoded + unletterboxed)")
 
 
+def test_default_model_path():
+    """--detector with no path prefers yolov8m, falls back to the bundled nano."""
+    import tempfile
+    from detector import default_model_path
+    with tempfile.TemporaryDirectory() as td:
+        open(os.path.join(td, "visdrone_n.onnx"), "w").close()
+        assert default_model_path(td).endswith("visdrone_n.onnx")
+        open(os.path.join(td, "visdrone_m.onnx"), "w").close()
+        assert default_model_path(td).endswith("visdrone_m.onnx")
+    print("default_model_path: OK  (prefers yolov8m, falls back to nano)")
+
+
+def test_best_match_distance_gate():
+    """A far-away same-class detection must NOT be re-locked onto (returns None),
+    so a vanished object triggers loss instead of an identity switch."""
+    if not os.path.exists(MODEL):
+        print("best_match distance gate: SKIP (model not present)")
+        return
+    from detector import YoloOnnxDetector
+
+    class FakeSess:
+        def __init__(self, out):
+            self.out = out
+        def run(self, *a, **k):
+            return [self.out]
+
+    d = YoloOnnxDetector(MODEL)
+    # one car far in the corner (640-space), no letterbox pad for 640x640
+    d.session = FakeSess(np.array([[[600, 600, 630, 630, 0.9, 3]]], np.float32))
+    frame = np.zeros((640, 640, 3), np.uint8)
+    ref_near = (600, 600, 30, 30)        # overlaps the detection -> match
+    ref_far = (10, 10, 30, 30)           # far away -> should be rejected
+    assert d.best_match(frame, ref_near) is not None
+    assert d.best_match(frame, ref_far) is None
+    print("best_match distance gate: OK  (rejects distant distractor)")
+
+
 def main():
     test_geometry()
     test_snap_on_start()
     test_confidence_gated_loss()
     test_real_model()
     test_nms_format_output()
+    test_default_model_path()
+    test_best_match_distance_gate()
     print("\nall detector tests passed.")
 
 

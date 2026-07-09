@@ -67,13 +67,14 @@ DroTrack's advantage is real aerial footage with camera ego-motion, so benchmark
 on your own clips before choosing.
 
 **Detection-assisted follow (recommended for drone footage):** add `--detector`
-to back the click-tracker with our VisDrone-trained YOLOv8 model
-(`models/visdrone_n.onnx`, run via ONNX Runtime — no PyTorch needed):
+to back the click-tracker with our VisDrone-trained YOLOv8 model, run via ONNX
+Runtime (no PyTorch needed). The bare flag auto-picks the best bundled model —
+**yolov8m** (`models/visdrone_m.onnx`) if present, else the lighter **yolov8n**:
 
 ```bash
-python3 tracker.py --detector                       # uses models/visdrone_n.onnx
+python3 tracker.py --detector                       # auto: yolov8m if present, else nano
 python3 tracker.py --detector --detect-classes car,van,truck,bus
-python3 tracker.py --detector models/visdrone_m.onnx --detect-interval 10
+python3 tracker.py --detector models/visdrone_n.onnx # force the fast nano
 ```
 
 With a detector the click **snaps onto the detected object box** (not a fixed
@@ -84,8 +85,15 @@ confidently tracking nothing. That's the fix for the silent-drift failure the
 plain trackers show on real aerial clips. Restrict targets with
 `--detect-classes` (names or ids: pedestrian, people, bicycle, car, van, truck,
 tricycle, awning-tricycle, bus, motor). Install the optional dep with
-`pip install onnxruntime`. Once yolov8m finishes training, drop in its
-`best.onnx` the same way for higher accuracy.
+`pip install onnxruntime`.
+
+**Model choice / speed:** yolov8m is much more accurate (mAP@50 0.42 vs the
+nano's 0.30) but heavier — roughly **290 ms per detection on an M2 CPU** vs
+**~40 ms** for yolov8n. The detector only runs every `--detect-interval` frames
+(CSRT fills the gaps), so on CPU raise the interval for yolov8m
+(e.g. `--detect-interval 30`) to stay smooth, or use the nano. For true
+real-time with yolov8m, run it on the Mac Neural Engine via CoreML
+(`models/visdrone_m.mlpackage`).
 
 **Distance:** estimated from shoulder width via the pinhole model; tune with
 `--shoulder-width 0.40` (metres) if your subjects differ. It's a ±15-20%

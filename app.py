@@ -848,12 +848,12 @@ def main():
     ap.add_argument("--token", default=None,
                     help="require this access token on the API/video endpoints; "
                          "auto-generated when --host is not localhost")
-    ap.add_argument("--detector", nargs="?", const="models/visdrone_n.onnx",
+    ap.add_argument("--detector", nargs="?", const="auto",
                     default=None, metavar="ONNX",
                     help="enable detection-assisted follow with a YOLOv8 ONNX "
-                         "model (bare flag uses models/visdrone_n.onnx); a click "
-                         "snaps onto the detected object and re-locks to fresh "
-                         "detections instead of drifting")
+                         "model (bare flag auto-picks the best bundled model: "
+                         "yolov8m if present, else yolov8n); a click snaps onto "
+                         "the detected object and re-locks to fresh detections")
     ap.add_argument("--detect-classes", default=None, metavar="LIST",
                     help="comma-separated class names/ids to allow as targets, "
                          "e.g. car,van,truck,bus (default: any)")
@@ -864,8 +864,10 @@ def main():
     args = ap.parse_args()
 
     if args.detector:
-        from detector import YoloOnnxDetector
-        det = YoloOnnxDetector(args.detector, conf=args.detect_conf)
+        from detector import YoloOnnxDetector, default_model_path
+        model_path = default_model_path(T.MODEL_DIR) if args.detector == "auto" \
+            else args.detector
+        det = YoloOnnxDetector(model_path, conf=args.detect_conf)
         classes = None
         if args.detect_classes:
             ids = []

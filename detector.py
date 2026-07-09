@@ -16,6 +16,7 @@ clear error only when you actually try to build a detector.
 """
 
 import json
+import math
 import os
 from collections import namedtuple
 
@@ -41,6 +42,17 @@ def iou_xywh(a, b):
 def box_center(box):
     x, y, w, h = box[:4]
     return (x + w / 2.0, y + h / 2.0)
+
+
+def default_model_path(models_dir):
+    """Best bundled detector available: prefer the bigger, more accurate
+    yolov8m, else the yolov8n that ships in the repo. Used when --detector is
+    given with no explicit path."""
+    for name in ("visdrone_m.onnx", "visdrone_n.onnx"):
+        p = os.path.join(models_dir, name)
+        if os.path.exists(p):
+            return p
+    return os.path.join(models_dir, "visdrone_n.onnx")
 
 
 class YoloOnnxDetector:
@@ -181,9 +193,14 @@ class YoloOnnxDetector:
         dets.sort(key=lambda d: d.conf, reverse=True)
         return dets
 
-    def best_match(self, frame, ref_box, classes=None, min_iou=0.2):
-        """Return the detection that best matches ref_box (highest IoU above
-        min_iou; if none overlap, the nearest-center detection), or None."""
+    def best_match(self, frame, ref_box, classes=None, min_iou=0.2,
+                   max_center_dist=None):
+        """Return the detection that best matches ref_box: the highest-IoU one
+        above min_iou, or -- if none overlap -- the nearest-center detection,
+        but only if it's within max_center_dist (default 2.5x the ref-box
+        diagonal). Returns None otherwise, so a vanished object is NOT re-locked
+        onto a distant distractor of the same class (which would defeat loss
+        reporting and cause identity switches on crowded scenes)."""
         dets = self.detect(frame, classes=classes)
         if not dets:
             return None
@@ -191,12 +208,18 @@ class YoloOnnxDetector:
         best_iou, best = max(scored, key=lambda s: s[0])
         if best_iou >= min_iou:
             return best
-        # nothing overlaps: fall back to nearest center (helps recover a lost
-        # tracker when the object moved fast between detector cycles)
+        # nothing overlaps: the nearest-center detection can recover a
+        # fast-moving object, but only if it's plausibly close.
         rcx, rcy = box_center(ref_box)
-        best = min(dets, key=lambda d: (box_center(d)[0] - rcx) ** 2
-                   + (box_center(d)[1] - rcy) ** 2)
-        return best
+        nearest = min(dets, key=lambda d: (box_center(d)[0] - rcx) ** 2
+                      + (box_center(d)[1] - rcy) ** 2)
+        if max_center_dist is None:
+            diag = math.hypot(ref_box[2], ref_box[3])
+            max_center_dist = 2.5 * max(diag, 1.0)
+        ncx, ncy = box_center(nearest)
+        if math.hypot(ncx - rcx, ncy - rcy) <= max_center_dist:
+            return nearest
+        return None
 
     def pick_at(self, frame, cx, cy, classes=None):
         """Pick the detection to lock onto for a click at (cx, cy): a box that

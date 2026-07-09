@@ -490,13 +490,14 @@ def parse_args():
                     default="CSRT",
                     help="click-to-follow tracker: CSRT (accurate), KCF "
                          "(faster), or DROTRACK (drone-tuned, TF-free)")
-    ap.add_argument("--detector", nargs="?", const="models/visdrone_n.onnx",
+    ap.add_argument("--detector", nargs="?", const="auto",
                     default=None, metavar="ONNX",
                     help="enable detection-assisted follow with a YOLOv8 ONNX "
-                         "model (bare flag uses models/visdrone_n.onnx). Snaps "
-                         "the click onto the detected box and re-locks the "
-                         "tracker to fresh detections, reporting a real loss "
-                         "when the object is gone instead of drifting")
+                         "model (bare flag auto-picks the best bundled model: "
+                         "yolov8m if present, else yolov8n). Snaps the click "
+                         "onto the detected box and re-locks the tracker to "
+                         "fresh detections, reporting a real loss when the "
+                         "object is gone instead of drifting")
     ap.add_argument("--detect-classes", default=None, metavar="LIST",
                     help="comma-separated class names or ids to allow as "
                          "targets, e.g. car,van,truck,bus (default: any)")
@@ -560,9 +561,11 @@ def main():
     detector = None
     target_classes = None
     if args.detector:
-        from detector import YoloOnnxDetector
-        print(f"Detector: loading {args.detector} ...")
-        detector = YoloOnnxDetector(args.detector, conf=args.detect_conf)
+        from detector import YoloOnnxDetector, default_model_path
+        model_path = default_model_path(MODEL_DIR) if args.detector == "auto" \
+            else args.detector
+        print(f"Detector: loading {model_path} ...")
+        detector = YoloOnnxDetector(model_path, conf=args.detect_conf)
         if args.detect_classes:
             ids = []
             for tok in args.detect_classes.split(","):
