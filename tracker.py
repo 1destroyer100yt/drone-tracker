@@ -52,6 +52,8 @@ import mediapipe as mp
 from mediapipe.tasks.python import BaseOptions, vision
 
 import distance
+from filters import OneEuroFilter, PointSmoother
+from motion import VelocityTracker, real_speed
 
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 POSE_MODELS = {
@@ -111,64 +113,6 @@ def draw_distance(frame, center, target):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
     cv2.putText(frame, label, (mid[0] + 6, mid[1] - 6),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, WHITE, 1, cv2.LINE_AA)
-
-
-class OneEuroFilter:
-    """One-Euro filter (Casiez et al. 2012) for one scalar signal.
-
-    Adapts its smoothing to speed: heavy smoothing when the value is
-    nearly still (no jitter), light smoothing when it moves fast (no lag).
-    """
-
-    def __init__(self, min_cutoff=1.0, beta=0.01, d_cutoff=1.0):
-        self.min_cutoff = min_cutoff
-        self.beta = beta
-        self.d_cutoff = d_cutoff
-        self.x_prev = None
-        self.dx_prev = 0.0
-        self.t_prev = None
-
-    @staticmethod
-    def _alpha(dt, cutoff):
-        r = 2.0 * math.pi * cutoff * dt
-        return r / (r + 1.0)
-
-    def __call__(self, t, x):
-        if self.x_prev is None:
-            self.x_prev, self.t_prev = x, t
-            return x
-        dt = max(t - self.t_prev, 1e-6)
-        self.t_prev = t
-
-        # smoothed derivative (px/s)
-        a_d = self._alpha(dt, self.d_cutoff)
-        dx = (x - self.x_prev) / dt
-        dx_s = a_d * dx + (1 - a_d) * self.dx_prev
-        self.dx_prev = dx_s
-
-        # cutoff rises with speed -> less smoothing when moving fast
-        cutoff = self.min_cutoff + self.beta * abs(dx_s)
-        a = self._alpha(dt, cutoff)
-        self.x_prev = a * x + (1 - a) * self.x_prev
-        return self.x_prev
-
-
-class PointSmoother:
-    """One-Euro-filtered (x, y) points, keyed by track name."""
-
-    def __init__(self):
-        self.filters = {}
-
-    def update(self, key, t, x, y):
-        if key not in self.filters:
-            self.filters[key] = (OneEuroFilter(), OneEuroFilter())
-        fx, fy = self.filters[key]
-        return fx(t, x), fy(t, y)
-
-    def forget_missing(self, live_keys):
-        for key in list(self.filters):
-            if key not in live_keys:
-                del self.filters[key]
 
 
 class TrackAssigner:
@@ -252,6 +196,8 @@ class ObjectFollower:
         self.det_misses = 0
         self.cls = None            # locked object's class id (from detector)
         self.score = None          # last detection confidence
+        self.vel = None            # VelocityTracker (created on start)
+        self.speed_px = 0.0        # smoothed target speed, pixels/second
 
     @property
     def active(self):
@@ -321,6 +267,8 @@ class ObjectFollower:
         self.lost = 0
         self.frame_i = 0
         self.det_misses = 0
+        self.vel = VelocityTracker()
+        self.speed_px = 0.0
         return True
 
     def _redetect(self, frame):
@@ -345,8 +293,17 @@ class ObjectFollower:
             self.clear()
         return None
 
-    def update(self, frame):
-        """Return the (cx, cy) centre of the tracked box, or None if lost."""
+    def _track_velocity(self, center, t):
+        if center is None or self.vel is None:
+            return
+        if t is None:
+            t = time.monotonic()
+        self.speed_px = self.vel.update(t, center[0], center[1])
+
+    def update(self, frame, t=None):
+        """Return the (cx, cy) centre of the tracked box, or None if lost.
+        Pass `t` (seconds) for correct speed on recorded/variable-rate video;
+        omit it and wall-clock time is used (correct for a live camera)."""
         if self.tracker is None:
             return None
         ok, box = self.tracker.update(frame)
@@ -365,14 +322,16 @@ class ObjectFollower:
             if not ok or self.frame_i % self.detect_interval == 0:
                 relock = self._redetect(frame)
                 if relock is not None:
-                    return relock
-                if self.tracker is None:      # _redetect declared it lost
+                    center = relock
+                elif self.tracker is None:    # _redetect declared it lost
+                    self.speed_px = 0.0
                     return None
-            return center                     # None if CSRT is between fixes
+                # else: no match this cycle -> center stays (None between fixes)
+        elif not ok and self.lost > self.max_lost:
+            self.clear()                       # no detector: brief-occlusion only
+            return None
 
-        # no detector: original brief-occlusion tolerance
-        if not ok and self.lost > self.max_lost:
-            self.clear()
+        self._track_velocity(center, t)
         return center
 
     def clear(self):
@@ -383,6 +342,8 @@ class ObjectFollower:
         self.det_misses = 0
         self.cls = None
         self.score = None
+        self.vel = None
+        self.speed_px = 0.0
 
 
 class FrameGrabber:
@@ -691,8 +652,9 @@ def main():
                 follower.start(frame, click[0], click[1])
                 obj_filter = (OneEuroFilter(), OneEuroFilter())
 
-            obj_center = follower.update(frame) if follower.active else None
+            obj_center = follower.update(frame, t) if follower.active else None
             obj_m = None
+            obj_mph = None
             if obj_center is not None:
                 ox, oy = obj_center
                 if obj_filter:
@@ -701,6 +663,8 @@ def main():
                 bw_px = follower.box[2] if follower.box else 0
                 if bw_px > 1:
                     obj_m = args.target_width * distance.focal_px(w, hfov_rad) / bw_px
+                _, obj_mph = real_speed(follower.speed_px, obj_m,
+                                        distance.focal_px(w, hfov_rad))
 
             # unified target: clicked object if present, else the closest person
             if obj_center is not None:
@@ -751,6 +715,10 @@ def main():
                     otag = f"TARGET d={target_px:.0f}px"
                     if obj_m is not None:
                         otag += f" ~{distance.fmt_distance(obj_m, imperial)}"
+                    if obj_mph is not None:
+                        otag += f"  {obj_mph:.0f} mph"
+                    elif follower.speed_px > 1:
+                        otag += f"  {follower.speed_px:.0f} px/s"
                     cv2.putText(frame, otag, (bx, by - 6),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 1, cv2.LINE_AA)
                 elif follower.active:   # temporarily lost, show a hint
@@ -786,9 +754,10 @@ def main():
                 d = f"{target_px:.0f}px" if target_px is not None else "none"
                 rng = f"  ~{distance.fmt_distance(target_m, imperial)}" \
                     if target_m is not None else ""
+                spd = f"  {obj_mph:.0f}mph" if obj_mph is not None else ""
                 extra = f"  follow:{follow_status}" if follow_status else ""
                 print(f"{fps:4.1f} fps  people:{len(pose_result.pose_landmarks)}"
-                      f"  closest:{d}{rng}{extra}")
+                      f"  closest:{d}{rng}{spd}{extra}")
     except KeyboardInterrupt:
         pass
     finally:
