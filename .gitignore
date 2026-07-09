@@ -15,3 +15,11 @@ ardupilot_build/ardupilot/
 # scratch
 scratchpad/
 *.log
+
+# Large yolov8m detector: kept local (99 MB each), not in git. The nano
+# models/visdrone_n.onnx is the in-repo default; use the bigger one with
+# --detector models/visdrone_m.onnx. Add via Git LFS if you want it tracked.
+models/visdrone_m.onnx
+models/visdrone_m.mlpackage/
+# raw Colab training run dumped into the repo (weights already copied to models/)
+visdrone_m/
