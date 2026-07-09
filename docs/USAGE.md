@@ -109,6 +109,23 @@ pedestrians/motorbikes) at ~1.5× the cost. Use `CxR` (`3x2` for a wide frame,
 `2x3` for a tall one). It only helps genuinely dense scenes — it won't invent
 objects in sparse footage.
 
+**Target analytics — speed, size, re-identification** (when following an object
+with `--detector`): the overlay/HUD and web `/api/state` add
+- **Speed** in **mph** — smoothed velocity of the tracked object, converted from
+  px/s via metres-per-pixel (from the distance estimate; from UAV telemetry when
+  flying). Shown as px/s if no scale is known.
+- **Size** — real dimensions, e.g. `4.5x1.8m`. Measured from a metres-per-pixel
+  scene scale inferred from known-size vehicles acting as rulers (accurate for
+  near-nadir footage; falls back to class-typical size, prefixed `~`, when no
+  ruler is visible). Length is the reliable dimension.
+- **Re-identification through occlusion** — if the target is briefly hidden
+  (goes behind something), the follower **coasts** on its last velocity for
+  `--coast-seconds` (default **15**), predicting where it should be, and
+  **re-locks the same object** when it reappears by matching colour signature +
+  predicted position + size + class. It won't grab a different same-class object
+  (e.g. a different-coloured car). The overlay shows `COASTING Ns (re-id)`; if
+  the window elapses with no match, the target is declared LOST.
+
 **Distance:** estimated from shoulder width via the pinhole model; tune with
 `--shoulder-width 0.40` (metres) if your subjects differ. It's a ±15-20%
 estimate — see [SAFETY.md](SAFETY.md). Show it in **feet and inches** with

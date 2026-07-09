@@ -18,6 +18,10 @@ Raspberry Pi, with a CLI, a web control panel, and an ArduPilot integration.
   click onto the real detected box, **re-locks to fresh detections** so it can't
   silently drift onto the background, and **reports the target LOST** when the
   object is actually gone.
+- **Target analytics:** for a followed object — **speed** (mph), **real-world
+  size** (from a vehicle-derived scene scale), and **re-identification through
+  occlusion** (coast on velocity up to 15 s, re-lock the same object by colour +
+  predicted position when it reappears).
 - **Web panel:** multi-camera (webcam + RTSP), live video, an **Auto-best**
   view that switches to whichever camera has the clearest subject, and a
   **Grid** multi-view.
@@ -34,6 +38,8 @@ Raspberry Pi, with a CLI, a web control panel, and an ArduPilot integration.
 | [`app.py`](app.py) | Web control panel (multi-camera, RTSP, auto-best) |
 | [`detector.py`](detector.py) | YOLOv8 object detector via ONNX Runtime (no PyTorch) |
 | [`coreml_detector.py`](coreml_detector.py) | YOLOv8 on the Apple Neural Engine (CoreML, real-time yolov8m on a Mac) |
+| [`motion.py`](motion.py), [`size.py`](size.py), [`appearance.py`](appearance.py) | Target speed (mph), real-world size, and occlusion re-identification |
+| [`filters.py`](filters.py) | One-Euro smoothing filter |
 | [`uav.py`](uav.py) | MAVLink gimbal aim + orbit-follow |
 | [`geo.py`](geo.py) | Camera line-of-sight → ground position math |
 | [`test_uav.py`](test_uav.py), [`test_flight.py`](test_flight.py), [`test_detector.py`](test_detector.py) | Tests (no hardware) |
