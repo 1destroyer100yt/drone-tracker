@@ -66,6 +66,66 @@ On clean synthetic video CSRT is the most accurate and DroTrack the fastest;
 DroTrack's advantage is real aerial footage with camera ego-motion, so benchmark
 on your own clips before choosing.
 
+**Detection-assisted follow (recommended for drone footage):** add `--detector`
+to back the click-tracker with our VisDrone-trained YOLOv8 model, run via ONNX
+Runtime (no PyTorch needed). The bare flag auto-picks the best bundled model —
+**yolov8m** (`models/visdrone_m.onnx`) if present, else the lighter **yolov8n**:
+
+```bash
+python3 tracker.py --detector                       # auto: yolov8m if present, else nano
+python3 tracker.py --detector --detect-classes car,van,truck,bus
+python3 tracker.py --detector models/visdrone_n.onnx # force the fast nano
+```
+
+With a detector the click **snaps onto the detected object box** (not a fixed
+square), the tracker **re-locks to a fresh detection every `--detect-interval`
+frames** so it can't slowly drift onto the background, and — crucially — when the
+object truly leaves the frame the follower **reports the target LOST** instead of
+confidently tracking nothing. That's the fix for the silent-drift failure the
+plain trackers show on real aerial clips. Restrict targets with
+`--detect-classes` (names or ids: pedestrian, people, bicycle, car, van, truck,
+tricycle, awning-tricycle, bus, motor). Install the optional dep with
+`pip install onnxruntime`.
+
+**Model choice / speed:** yolov8m is much more accurate (mAP@50 0.42 vs the
+nano's 0.30) but heavier — roughly **290 ms per detection on an M2 CPU** vs
+**~40 ms** for yolov8n. The detector only runs every `--detect-interval` frames
+(CSRT fills the gaps), so on CPU raise the interval for yolov8m
+(e.g. `--detect-interval 30`) to stay smooth, or use the nano.
+
+**Apple Neural Engine (real-time yolov8m on a Mac):** pass the CoreML package to
+run on the Neural Engine — `--detector models/visdrone_m.mlpackage` — which is
+**~43 ms/detect (~23/s), 6× faster** than ONNX-CPU (measured on an M2), i.e.
+real-time. On a Mac the bare `--detector` flag picks this automatically when the
+`.mlpackage` is present. Install the dep with `pip install coremltools pillow`
+(CoreML is macOS-only; on a Pi/Linux use the ONNX models). Parity with the ONNX
+model is exact (matching boxes at IoU ≥ 0.7).
+
+**Tiled inference for dense / high-res frames:** `--detect-tiles 2x2` runs the
+detector on an overlapping grid (plus a full-frame pass) and merges with NMS, so
+small objects lost when a big frame is squished to 640×640 are recovered. On a
+crowded 1080p aerial frame this found **~35–40% more** objects (mostly small
+pedestrians/motorbikes) at ~1.5× the cost. Use `CxR` (`3x2` for a wide frame,
+`2x3` for a tall one). It only helps genuinely dense scenes — it won't invent
+objects in sparse footage.
+
+**Target analytics — speed, size, re-identification** (when following an object
+with `--detector`): the overlay/HUD and web `/api/state` add
+- **Speed** in **mph** — smoothed velocity of the tracked object, converted from
+  px/s via metres-per-pixel (from the distance estimate; from UAV telemetry when
+  flying). Shown as px/s if no scale is known.
+- **Size** — real dimensions, e.g. `4.5x1.8m`. Measured from a metres-per-pixel
+  scene scale inferred from known-size vehicles acting as rulers (accurate for
+  near-nadir footage; falls back to class-typical size, prefixed `~`, when no
+  ruler is visible). Length is the reliable dimension.
+- **Re-identification through occlusion** — if the target is briefly hidden
+  (goes behind something), the follower **coasts** on its last velocity for
+  `--coast-seconds` (default **15**), predicting where it should be, and
+  **re-locks the same object** when it reappears by matching colour signature +
+  predicted position + size + class. It won't grab a different same-class object
+  (e.g. a different-coloured car). The overlay shows `COASTING Ns (re-id)`; if
+  the window elapses with no match, the target is declared LOST.
+
 **Distance:** estimated from shoulder width via the pinhole model; tune with
 `--shoulder-width 0.40` (metres) if your subjects differ. It's a ±15-20%
 estimate — see [SAFETY.md](SAFETY.md). Show it in **feet and inches** with
