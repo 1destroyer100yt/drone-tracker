@@ -211,6 +211,7 @@ class ObjectFollower:
         self.coast_pred = None     # predicted (x, y) while occluded
         self.coast_vx = self.coast_vy = 0.0
         self.coast_size = None
+        self.confirmed = None      # (t, center, vx, vy) at last detector confirm
 
     @property
     def active(self):
@@ -249,18 +250,18 @@ class ObjectFollower:
         return x, y, bw, bh
 
     def _init_tracker(self, frame, box):
-        """(Re)create the tracker locked to box. Returns True on success."""
+        """(Re)create the tracker locked to box. Returns True on success; on
+        failure the existing tracker/box are left untouched."""
         h, w = frame.shape[:2]
         x, y, bw, bh = self._clip_box(box, w, h)
-        self.tracker = self._new_tracker()
+        tracker = self._new_tracker()
         try:
-            res = self.tracker.init(frame, (x, y, bw, bh))
+            res = tracker.init(frame, (x, y, bw, bh))
         except Exception:
             res = False
         if res is False:        # DroTrack couldn't lock (cv2 returns None = ok)
-            self.tracker = None
-            self.box = None
             return False
+        self.tracker = tracker
         self.box = (x, y, bw, bh)
         return True
 
@@ -292,6 +293,7 @@ class ObjectFollower:
             s = self.box_size
             box = (cx - s / 2, cy - s / 2, s, s)
         if not self._init_tracker(frame, box):
+            self.clear()
             return False
         self.state = "active"
         self.lost = 0
@@ -305,7 +307,7 @@ class ObjectFollower:
         self.center = (x + bw / 2.0, y + bh / 2.0)
         self.sig_hist = None
         self.coast_pred = None
-        self._update_signature(frame)
+        self._confirm(frame, None)     # start() has no timestamp to anchor to
         return True
 
     def _redetect(self, frame, t):
@@ -331,10 +333,14 @@ class ObjectFollower:
                 self.det_misses = 0
                 self.score = match.conf
                 x, y, bw, bh = self.box
-                return (x + bw / 2.0, y + bh / 2.0)
+                center = (x + bw / 2.0, y + bh / 2.0)
+                self._track_velocity(center, t)
+                self.center = center
+                self._confirm(frame, t)
+                return center
         self.det_misses += 1
         if self.det_misses >= self.max_detect_misses:
-            if self.detector is not None and self.sig_hist is not None:
+            if self.sig_hist is not None:
                 self._enter_coasting(t)        # occluded -> coast & re-identify
             else:
                 self.clear()
@@ -347,9 +353,18 @@ class ObjectFollower:
             t = time.monotonic()
         self.speed_px = self.vel.update(t, center[0], center[1])
 
+    def _confirm(self, frame, t):
+        """The detector just confirmed the box: learn appearance and snapshot
+        position + velocity. Done only on confirmed boxes -- never on raw CSRT
+        output -- so an occluder the tracker latches onto for a few seconds
+        can't poison the re-id signature or zero the coasting velocity."""
+        self._update_signature(frame)
+        vx, vy = (self.vel.vx, self.vel.vy) if self.vel else (0.0, 0.0)
+        self.confirmed = (t, self.center, vx, vy)
+
     def _update_signature(self, frame):
-        """Refresh the appearance (colour-histogram) signature while locked, as
-        a running average so it adapts to gradual lighting/pose change."""
+        """Refresh the appearance (colour-histogram) signature from a confirmed
+        box, as a running average so it adapts to gradual lighting change."""
         if self.box is None:
             return
         h = appearance.box_histogram(frame, self.box)
@@ -364,9 +379,15 @@ class ObjectFollower:
         self.tracker = None
         self.state = "coasting"
         self.coast_start = self.coast_last_t = t
-        self.coast_pred = self.center
-        self.coast_vx = self.vel.vx if self.vel else 0.0
-        self.coast_vy = self.vel.vy if self.vel else 0.0
+        # dead-reckon from the last *confirmed* sighting, not the (possibly
+        # occluder-stuck) CSRT box
+        self.coast_pred, self.coast_vx, self.coast_vy = self.center, 0.0, 0.0
+        if self.confirmed is not None:
+            t_c, c, vx, vy = self.confirmed
+            self.coast_vx, self.coast_vy = vx, vy
+            if c is not None:
+                gap = max(0.0, t - t_c) if t_c is not None else 0.0
+                self.coast_pred = (c[0] + vx * gap, c[1] + vy * gap)
         self.coast_size = (self.box[2], self.box[3]) if self.box else None
         self.speed_px = 0.0
 
@@ -434,8 +455,8 @@ class ObjectFollower:
                 self.lost = self.det_misses = 0
                 x, y, bw, bh = self.box
                 self.center = (x + bw / 2.0, y + bh / 2.0)
-                self._update_signature(frame)
                 self._track_velocity(self.center, t)
+                self._confirm(frame, t)
                 return self.center
         return None
 
@@ -467,8 +488,8 @@ class ObjectFollower:
             if not ok or self.frame_i % self.detect_interval == 0:
                 relock = self._redetect(frame, t)
                 if relock is not None:
-                    center = relock
-                elif self.state != "active":  # entered coasting or cleared
+                    return relock              # _redetect updated velocity etc.
+                if self.state != "active":     # entered coasting or cleared
                     return None
         elif not ok and self.lost > self.max_lost:
             self.clear()                       # no detector: brief-occlusion only
@@ -476,8 +497,9 @@ class ObjectFollower:
 
         if center is not None:
             self._track_velocity(center, t)
-            self._update_signature(frame)
             self.center = center
+            if self.detector is None:
+                self._update_signature(frame)  # no detector: CSRT is all we have
         return center
 
     def clear(self):
@@ -496,6 +518,7 @@ class ObjectFollower:
         self.last_dets = []
         self.sig_hist = None
         self.coast_pred = None
+        self.confirmed = None
 
 
 class FrameGrabber:
@@ -832,10 +855,16 @@ def main():
                     if dims:
                         obj_size = (dims, measured)
 
-            # unified target: clicked object if present, else the closest person
+            # unified target: clicked object if present, else the closest person.
+            # While the clicked object is momentarily unseen (coasting through
+            # an occlusion) hold with no target rather than swinging the
+            # gimbal / orbit onto a bystander.
             if obj_center is not None:
                 target_xy, target_m = obj_center, obj_m
                 closest_idx = None          # people drawn red; object is green
+            elif follower.alive:
+                target_xy, target_m = None, None
+                closest_idx = None
             elif closest_idx is not None:
                 target_xy = (tracked[closest_idx][0], tracked[closest_idx][1])
                 target_m = tracked[closest_idx][4]

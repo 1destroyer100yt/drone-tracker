@@ -269,6 +269,11 @@ class TrackerEngine:
             if obj_center is not None:
                 target_xy, target_m = obj_center, obj_m
                 ci = None                     # people red; object is green
+            elif self.follower.alive:
+                # clicked object momentarily unseen (coasting): hold, don't
+                # swing the gimbal / orbit onto a bystander
+                target_xy, target_m = None, None
+                ci = None
             elif ci is not None:
                 target_xy, target_m = (tracked[ci][0], tracked[ci][1]), \
                     tracked[ci][4]

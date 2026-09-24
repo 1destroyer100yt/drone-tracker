@@ -207,6 +207,24 @@ def test_best_match_distance_gate():
     print("best_match distance gate: OK  (rejects distant distractor)")
 
 
+def test_pick_at_distance_gate():
+    """A click on something the detector missed must not snap onto a car on the
+    other side of the frame; a click just beside a car still picks it."""
+    from detector import _DetectorBase
+
+    class Fixed(_DetectorBase):
+        names = {3: "car"}
+
+        def detect(self, frame, classes=None):
+            return [Detection(500, 400, 40, 20, 0.9, 3, "car")]
+
+    d, frame = Fixed(), np.zeros((480, 640, 3), np.uint8)
+    assert d.pick_at(frame, 510, 410) is not None      # inside the box
+    assert d.pick_at(frame, 550, 410) is not None      # just beside it
+    assert d.pick_at(frame, 60, 60) is None            # far away -> no snap
+    print("pick_at distance gate: OK  (no snap to a far-away car)")
+
+
 COREML = os.path.join(os.path.dirname(__file__), "models", "visdrone_m.mlpackage")
 
 
@@ -274,6 +292,7 @@ def main():
     test_nms_format_output()
     test_default_model_path()
     test_best_match_distance_gate()
+    test_pick_at_distance_gate()
     test_build_detector_dispatch()
     test_coreml_backend()
     test_parse_tiles()

@@ -110,7 +110,8 @@ class _DetectorBase:
                                  "visdrone_classes.json")
             names_path = guess if os.path.exists(guess) else None
         if names_path and os.path.exists(names_path):
-            raw = json.load(open(names_path))
+            with open(names_path) as f:
+                raw = json.load(f)
             return {int(k): v for k, v in raw.items()}
         return {}
 
@@ -170,9 +171,12 @@ class _DetectorBase:
         return self.match_in(self.detect(frame, classes=classes), ref_box,
                              min_iou, max_center_dist)
 
-    def pick_at(self, frame, cx, cy, classes=None):
+    def pick_at(self, frame, cx, cy, classes=None, max_dist_diags=1.0):
         """Pick the detection to lock onto for a click at (cx, cy): a box that
-        contains the point (smallest such box), else the nearest-center one."""
+        contains the point (smallest such box), else the nearest-center one if
+        the click is within `max_dist_diags` of that box's diagonal. None
+        otherwise, so clicking something the detector missed doesn't jump to a
+        car across the frame (the caller falls back to a plain click box)."""
         dets = self.detect(frame, classes=classes)
         if not dets:
             return None
@@ -180,8 +184,14 @@ class _DetectorBase:
                   if d.x <= cx <= d.x + d.w and d.y <= cy <= d.y + d.h]
         if inside:
             return min(inside, key=lambda d: d.w * d.h)
-        return min(dets, key=lambda d: (box_center(d)[0] - cx) ** 2
-                   + (box_center(d)[1] - cy) ** 2)
+
+        def dist(d):
+            bx, by = box_center(d)
+            return math.hypot(bx - cx, by - cy)
+        nearest = min(dets, key=dist)
+        if dist(nearest) <= max_dist_diags * math.hypot(nearest.w, nearest.h):
+            return nearest
+        return None
 
 
 class YoloOnnxDetector(_DetectorBase):

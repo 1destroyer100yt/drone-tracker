@@ -102,6 +102,45 @@ def test_reid_through_occlusion():
     print("re-id through occlusion: OK  (coasted, rejected blue, re-locked red)")
 
 
+def test_occluder_does_not_poison_signature():
+    """A textured occluder (a tree) that CSRT happily tracks for a few seconds
+    must not overwrite the target's colour signature -- otherwise re-id rejects
+    the real car when it comes back out."""
+    det = StubDet()
+    fol = T.ObjectFollower(detector=det, target_classes={3}, detect_interval=15,
+                           max_detect_misses=3, reid_min_sim=0.45)
+    f, box = scene(200)
+    det.set([car(box)])
+    assert fol.start(f, 200, 240)
+    t = 0.0
+    for i in range(1, 16):
+        t += 1 / 30
+        f, box = scene(200 + i)
+        det.set([car(box)])
+        fol.update(f, t)
+
+    rng = np.random.default_rng(0)
+    leaf = rng.integers(0, 90, (120, 170, 3)).astype(np.uint8)
+    leaf[..., 1] += 120
+    occ = np.full((480, 640, 3), 60, np.uint8)
+    occ[180:300, 150:320] = cv2.GaussianBlur(leaf, (3, 3), 0)
+    det.set([])
+    for _ in range(200):
+        if not fol.active:
+            break
+        t += 1 / 30
+        fol.update(occ, t)
+    assert fol.coasting, fol.state
+
+    f, box = scene(int(fol.coast_pred[0]))
+    det.set([car(box)])
+    for _ in range(15):
+        t += 1 / 30
+        fol.update(f, t)
+    assert fol.active, f"occluder poisoned the signature ({fol.state})"
+    print("occluder doesn't poison re-id signature: OK")
+
+
 def test_coast_timeout():
     """After coast_seconds with no re-id, the target is truly LOST."""
     det = StubDet()
@@ -123,6 +162,7 @@ def test_coast_timeout():
 def main():
     test_appearance()
     test_reid_through_occlusion()
+    test_occluder_does_not_poison_signature()
     test_coast_timeout()
     print("\nall re-id tests passed.")
 
