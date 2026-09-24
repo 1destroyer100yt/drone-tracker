@@ -2,7 +2,8 @@
 
 Turns the per-frame target centre into a smoothed velocity (pixels/second), and
 converts to real-world speed (m/s, mph) when a metres-per-pixel scale is known.
-The velocity also feeds occlusion coasting / re-identification (see reid.py).
+The velocity also feeds occlusion coasting / re-identification (see
+ObjectFollower in tracker.py and appearance.py).
 """
 
 import math

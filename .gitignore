@@ -24,7 +24,7 @@ models/visdrone_m.mlpackage/
 # raw Colab training run dumped into the repo (weights already copied to models/)
 visdrone_m/
 
-# generated demo clip
+# generated demo clips + local test footage (hundreds of MB)
 demo_aerial.mp4
-
 demo_car_follow.mp4
+videos/
