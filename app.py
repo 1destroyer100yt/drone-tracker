@@ -26,7 +26,9 @@ import cv2
 from flask import Flask, Response, jsonify, render_template_string, request
 
 import distance
+import size
 import tracker as T
+from motion import real_speed
 
 
 class TrackerEngine:
@@ -34,9 +36,11 @@ class TrackerEngine:
     latest annotated frame plus live status. Options are plain attributes the
     web layer flips at any time; the loop reads them each frame."""
 
-    def __init__(self, eid, source):
+    def __init__(self, eid, source, detector=None, target_classes=None,
+                 detect_interval=15):
         self.eid = eid
         self.source = source          # int index or str URL
+        self.detector = detector
         self.lock = threading.Lock()
         self.thread = None
         self.running = False
@@ -50,8 +54,13 @@ class TrackerEngine:
         self.units = "metric"        # or "imperial" (feet + inches)
         self.target_width = 1.8      # clicked-object real width (m), a car
 
-        # click-to-follow object tracker (seeded from a browser click)
-        self.follower = T.ObjectFollower()
+        # click-to-follow object tracker (seeded from a browser click). With a
+        # detector it snaps onto the detected object box, re-locks to fresh
+        # detections, and reports a real loss instead of drifting onto the
+        # background (confidence-gated loss reporting).
+        self.follower = T.ObjectFollower(
+            detector=detector, target_classes=target_classes,
+            detect_interval=detect_interval, coast_seconds=15.0)
         self._obj_filter = None
         self._pending_click = None   # (nx, ny) normalized, set by the web layer
         self._clear_target = False
@@ -60,7 +69,8 @@ class TrackerEngine:
         self.jpeg = None
         self.status = {"fps": 0.0, "people": 0, "closest": None,
                        "range_m": None, "target": False, "mavlink": "off",
-                       "follow": None, "score": 0.0}
+                       "follow": None, "score": 0.0, "target_cls": None,
+                       "speed_mph": None, "size": None, "coasting": None}
         self.events = deque(maxlen=40)
         self.uav = None
 
@@ -227,9 +237,11 @@ class TrackerEngine:
                 self.follower.start(frame, nx * w, ny * h)
                 self._obj_filter = (T.OneEuroFilter(), T.OneEuroFilter())
                 self.log(f"target set at ({nx:.2f},{ny:.2f})")
-            obj_center = self.follower.update(frame) if self.follower.active \
-                else None
+            obj_center = self.follower.update(frame, t) \
+                if self.follower.alive else None
             obj_m = None
+            obj_mph = None
+            obj_size = None
             if obj_center is not None:
                 ox, oy = obj_center
                 if self._obj_filter:
@@ -240,6 +252,18 @@ class TrackerEngine:
                 if bw_px > 1:
                     obj_m = self.target_width * distance.focal_px(
                         w, hfov_rad) / bw_px
+                _, obj_mph = real_speed(self.follower.speed_px, obj_m,
+                                        distance.focal_px(w, hfov_rad))
+                nm = self.detector.names.get(self.follower.cls) if (
+                    self.detector is not None
+                    and self.follower.cls is not None) else None
+                if self.follower.box:
+                    dims, meas = size.object_size(
+                        nm, self.follower.box[2], self.follower.box[3],
+                        self.follower.scene_scale)
+                    if dims:
+                        obj_size = ("" if meas else "~") + size.fmt_size(
+                            dims, self.units == "imperial")
             self.has_target = obj_center is not None
 
             if obj_center is not None:
@@ -283,11 +307,26 @@ class TrackerEngine:
                 T.draw_distance(frame, center, obj_center)
                 T.draw_cross(frame, obj_center[0], obj_center[1], T.GREEN)
                 otag = "TARGET"
+                if self.detector is not None and self.follower.cls is not None:
+                    nm = self.detector.names.get(self.follower.cls, "")
+                    if nm:
+                        otag += f" ({nm})"
                 if obj_m is not None:
                     otag += " ~" + distance.fmt_distance(
                         obj_m, self.units == "imperial")
+                if obj_mph is not None:
+                    otag += f"  {obj_mph:.0f} mph"
+                elif self.follower.speed_px > 1:
+                    otag += f"  {self.follower.speed_px:.0f} px/s"
+                if obj_size:
+                    otag += "  " + obj_size
                 cv2.putText(frame, otag, (bx, by - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, T.GREEN, 1, cv2.LINE_AA)
+            elif self.follower.coasting:
+                cv2.putText(frame,
+                            f"COASTING {self.follower.coast_elapsed:.0f}s (re-id)",
+                            (8, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                            (0, 200, 255), 1, cv2.LINE_AA)
             elif self.follower.active:
                 cv2.putText(frame, "target lost...", (8, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, T.RED, 1, cv2.LINE_AA)
@@ -304,11 +343,19 @@ class TrackerEngine:
             if target_xy is not None:
                 target_px = round(math.hypot(target_xy[0] - center[0],
                                              target_xy[1] - center[1]))
+            target_cls = None
+            if self.has_target and self.detector is not None \
+                    and self.follower.cls is not None:
+                target_cls = self.detector.names.get(self.follower.cls)
             self.status.update(
                 fps=round(fps, 1), people=len(result.pose_landmarks),
                 closest=target_px,
                 range_m=None if target_m is None else round(target_m, 1),
-                target=self.has_target, follow=follow_status, score=score)
+                target=self.has_target, follow=follow_status, score=score,
+                target_cls=target_cls, size=obj_size,
+                speed_mph=None if obj_mph is None else round(obj_mph, 1),
+                coasting=round(self.follower.coast_elapsed, 1)
+                if self.follower.coasting else None)
 
         grabber.stop()
         if landmarker:
@@ -325,6 +372,7 @@ class TrackerEngine:
                     num_poses=self.num_poses, mavlink=self.status["mavlink"],
                     follow=self.follow, units=self.units,
                     target=self.has_target, tracker=self.follower.algo,
+                    detector=self.detector is not None,
                     score=self.status["score"],
                     status=self.status, events=list(self.events))
 
@@ -334,6 +382,9 @@ class EngineManager:
         self.lock = threading.Lock()
         self.engines = {}      # eid -> TrackerEngine
         self._counter = 0
+        self.detector = None            # shared YoloOnnxDetector (or None)
+        self.target_classes = None      # allowed class ids for targets
+        self.detect_interval = 15
         self.available = []    # last camera-detect result
         self._best = None      # current best-view camera id
         self._score_floor = 5.0    # below this, nobody is really in view
@@ -343,7 +394,9 @@ class EngineManager:
         with self.lock:
             self._counter += 1
             eid = f"cam{self._counter}"
-            eng = TrackerEngine(eid, source)
+            eng = TrackerEngine(eid, source, detector=self.detector,
+                                target_classes=self.target_classes,
+                                detect_interval=self.detect_interval)
             self.engines[eid] = eng
         eng.log(f"added source {source!r}")
         eng.start()
@@ -703,7 +756,8 @@ function render(){
   clr.className=(e&&e.status.target)?'on':''; clr.disabled=!(e&&e.status.target);
   document.getElementById('trackerBtn').textContent='Tracker: '+(e?e.tracker:'CSRT');
   let hs=`${engines.length} camera${engines.length!==1?'s':''}`;
-  if(e&&e.status.target)hs+=' · TARGET LOCKED';
+  if(e&&e.status.target)hs+=' · TARGET LOCKED'+(e.status.target_cls?' ('+e.status.target_cls+')':'')+(e.status.speed_mph!=null?' · '+e.status.speed_mph+' mph':'')+(e.status.size?' · '+e.status.size:'');
+  if(e&&e.status.coasting!=null)hs+=' · COASTING '+e.status.coasting+'s (re-id)';
   if(e&&e.status.follow)hs+=' · follow: '+e.status.follow;
   document.getElementById('hstatus').textContent=hs;
   document.getElementById('log').textContent=e?e.events.join('\n'):'';
@@ -826,7 +880,47 @@ def main():
     ap.add_argument("--token", default=None,
                     help="require this access token on the API/video endpoints; "
                          "auto-generated when --host is not localhost")
+    ap.add_argument("--detector", nargs="?", const="auto",
+                    default=None, metavar="ONNX",
+                    help="enable detection-assisted follow with a YOLOv8 ONNX "
+                         "model (bare flag auto-picks the best bundled model: "
+                         "yolov8m if present, else yolov8n); a click snaps onto "
+                         "the detected object and re-locks to fresh detections")
+    ap.add_argument("--detect-classes", default=None, metavar="LIST",
+                    help="comma-separated class names/ids to allow as targets, "
+                         "e.g. car,van,truck,bus (default: any)")
+    ap.add_argument("--detect-interval", type=int, default=15,
+                    help="frames between detector re-locks (default 15)")
+    ap.add_argument("--detect-conf", type=float, default=0.25,
+                    help="detector confidence threshold (default 0.25)")
+    ap.add_argument("--detect-tiles", default=None, metavar="CxR",
+                    help="run detection on an overlapping CxR tile grid (e.g. "
+                         "2x3) to recover small objects in high-res/4K frames")
     args = ap.parse_args()
+
+    if args.detector:
+        from detector import build_detector, default_model_path, parse_tiles
+        model_path = default_model_path(T.MODEL_DIR) if args.detector == "auto" \
+            else args.detector
+        det = build_detector(model_path, conf=args.detect_conf,
+                             tiles=parse_tiles(args.detect_tiles))
+        classes = None
+        if args.detect_classes:
+            ids = []
+            for tok in args.detect_classes.split(","):
+                tok = tok.strip()
+                if not tok:
+                    continue
+                cid = int(tok) if tok.isdigit() else det.class_id(tok)
+                if cid is not None:
+                    ids.append(cid)
+            classes = set(ids) or None
+        manager.detector = det
+        manager.target_classes = classes
+        manager.detect_interval = args.detect_interval
+        names = [det.names.get(c, c) for c in sorted(classes)] if classes else []
+        print(f"Detector: {args.detector} ({len(det.names)} classes)"
+              + (f", targets: {', '.join(map(str, names))}" if names else ""))
 
     token = args.token or os.environ.get("APP_TOKEN")
     open_host = args.host not in ("127.0.0.1", "localhost", "::1")
